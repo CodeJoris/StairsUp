@@ -17,7 +17,7 @@ TARGET_COLS = ["time"] + RIGHT_FOOT_COLS + LEFT_FOOT_COLS
 
 SAMPLING_FREQUENCY = 60
 DETECTORS = ['shoe', 'ared', 'amvd', 'mbgtd']
-SPECS = {  # G values are sensor dependent more at https://github.com/utiasSTARS/pyshoe/tree/master
+SPECS = {  # G values are sensor/walking surface dependent more at https://github.com/utiasSTARS/pyshoe/tree/master
     'shoe': {"G":2e8},
     'ared': {"G":2.0},
     'amvd': {"G":7},
@@ -25,14 +25,57 @@ SPECS = {  # G values are sensor dependent more at https://github.com/utiasSTARS
 }
 
 
-def pyshoe_process_single_file(file_path, course, id, y_HS_true, y_FO_true, data_path):
+def pyshoe_process_single_file(
+    segment: pd.DataFrame, 
+    course: str, 
+    id: str, 
+    clip_id: int,  # Added to separate staircase events
+    y_HS_true: pd.DataFrame | np.ndarray, 
+    y_FO_true: pd.DataFrame | np.ndarray, 
+    data_path: Path
+) -> str:
     """
-    Reads the file, then runs all 4 detectors.
+    Processes a single trial dataset across all four zero-velocity update (ZUPT) 
+    detectors implemented in PyShoe.
+
+    This function extracts IMU data for both left and right feet (3-axis accelerometer 
+    and 3-axis gyroscope data), applies the 'shoe', 'ared', 'amvd', and 'mbgtd' state 
+    detectors, computes bilateral heel strike and foot off events, and saves separate 
+    MATLAB .mat summaries for each unique detector.
+
+    Parameters:
+    -----------
+    segment : pd.DataFrame
+        The data source for the trial. A pre-sliced Pandas DataFrame containing the target 
+        time frame. Must contain a 'time' index alongside the bilateral 
+        acceleration and angular velocity columns.
+        
+    course : str
+        The name of the course or environment directory (e.g., 'course_1').
+        
+    id : str
+        The subject identifier string matching the directory layout (e.g., 'subj_01').
+        
+    y_HS_true : pd.DataFrame or pd.Series or np.ndarray
+        The ground truth heel strike annotations for this specific segment window.
+        
+    y_FO_true : pd.DataFrame or pd.Series or np.ndarray
+        The ground truth foot off annotations for this specific segment window.
+        
+    data_path : pathlib.Path
+        The base Path object pointing to the global data directory where outputs 
+        will be structured across subfolders named after each active detector.
+
+    Returns:
+    --------
+    str
+        A status summary string confirming completion of missing detectors, a skip message 
+        if all four detectors are already found cached on disk, or an error description.
     """
     # Look at the disk first to see which detectors actually need to be run
     detectors_to_run = []
     for detector_name in DETECTORS:
-        out_file = data_path / "toolbox1" / detector_name / f'{id}_{course}.mat'
+        out_file = data_path / "toolbox1" / detector_name / f'{id}_{course}_{clip_id}.mat'
         if not out_file.exists():
             detectors_to_run.append((detector_name, out_file))
             
@@ -41,10 +84,9 @@ def pyshoe_process_single_file(file_path, course, id, y_HS_true, y_FO_true, data
         return f"Skipped {id}_{course} (Already completely processed)"
 
     try:
-        df = pd.read_csv(file_path, usecols=TARGET_COLS)
-        imu_left = df[LEFT_FOOT_COLS].to_numpy() 
-        imu_right = df[RIGHT_FOOT_COLS].to_numpy() # PyShoe takes in an N x 6 numpy array
-        time = df["time"].to_numpy().squeeze()
+        imu_left = segment[LEFT_FOOT_COLS].to_numpy() 
+        imu_right = segment[RIGHT_FOOT_COLS].to_numpy() # PyShoe takes in an N x 6 numpy array
+        time = segment["time"].to_numpy().squeeze()
 
         # loop detectors
         for detector_name, out_file in detectors_to_run:
@@ -101,7 +143,7 @@ def pyshoe_process_single_file(file_path, course, id, y_HS_true, y_FO_true, data
             out_file.parent.mkdir(parents=True, exist_ok=True)
             savemat(out_file, {'results': results})
 
-        return f"{id}_{course}.mat Success"
+        return f"{id}_{course}_{clip_id}.mat Success"
     
     except Exception as e:
         return f"Error: {str(e)}"
