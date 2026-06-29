@@ -1,2 +1,9 @@
 .venv
 data/
+
+C:\Users\theil\Documents\0_summer2026\0_git\StairsUp\python_code\src\preprocessing\__pycache__
+*.py[codz]
+*$py.class
+
+.pytest_cache/
+notebook/

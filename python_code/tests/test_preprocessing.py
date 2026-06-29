@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 import numpy as np
-from src.preprocessing.extractStairs import get_stair_segments
+from python_code.src.preprocessing.extractStairs import get_stair_segments
 
 @pytest.fixture
 def mock_label_file(tmp_path):
