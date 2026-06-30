@@ -15,6 +15,7 @@ from typing import List, Tuple
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize_scalar, linear_sum_assignment
+import os
 
 
 # Ensure imports for local toolbox/processing paths when run from python_code/ root
@@ -371,7 +372,7 @@ def optimize_detector_G(detector: str, training_clips: List[dict]):
             f1 = evaluate_G_on_clips(training_clips, detector, G)
             return 1.0 - f1
 
-        res = minimize_scalar(obj, bounds=(6.0, 10.0), method='bounded', options={'maxiter': 15})
+        res = minimize_scalar(obj, bounds=(8.0, 10.0), method='bounded', options={'maxiter': 15})
         G_opt = 10 ** res.x
     else:
         def obj(G):
@@ -490,11 +491,16 @@ def main():
 
     optimized_results = {d: {'G_vals': [], 'f1_tests': []} for d in detectors}
 
-    print(f"Starting True LOSO with {len(folds)} folds on multiple CPU cores...")
+    # Calculate a safe number of workers (e.g., 90% your total CPU cores)
+    # Using max(1, ...) ensures it doesn't try to assign 0 workers on small machines
+    safe_cores = max(1, int(os.cpu_count() * 0.9))
+    
+    print(f"Starting True LOSO with {len(folds)} folds using {safe_cores} CPU cores...")    
+
     
     # --- MULTIPROCESSING DISPATCHER ---
     tasks = []
-    with ProcessPoolExecutor() as executor:
+    with ProcessPoolExecutor(max_workers=safe_cores) as executor:
         for det in detectors:
             for fold in folds:
                 # Submit task to a CPU core
