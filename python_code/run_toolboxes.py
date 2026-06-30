@@ -51,7 +51,7 @@ def get_ytrue_for_stairs(course: str, id: str) -> list:
         file_path = DATA_PATH / "data_set" / course / id / "labels.csv"
 
         # 1. Get our stairs segments (start and end times)
-        stair_blocks = get_stair_segments(str(file_path), target_mode="walk")
+        stair_blocks = get_stair_segments(str(file_path), target_mode="stairs_up")
         if stair_blocks.empty:
             return []  # No stairs up in this entire trial
 

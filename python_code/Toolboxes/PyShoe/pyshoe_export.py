@@ -101,12 +101,22 @@ def pyshoe_process_single_file(
             diff_left = np.diff(padded_left)
             HS_indices_left = np.where(diff_left == 1)[0]
             FO_indices_left = np.where(diff_left == -1)[0]
-            # Case where foot started stationary
-            if steps_left[0]:
+            # Remove artificial HS if foot started in stance
+            if steps_left[0] and len(HS_indices_left) > 0:
                 HS_indices_left = HS_indices_left[1:]
-                FO_indices_left = FO_indices_left[1:]
+
             HS_times_left = time[HS_indices_left]
             FO_times_left = time[FO_indices_left]
+
+            # Drop lone initial Foot Off (if recording started mid-swing)
+            if len(FO_times_left) > 0 and len(HS_times_left) > 0:
+                if FO_times_left[0] < HS_times_left[0]:
+                    FO_times_left = FO_times_left[1:]
+                    
+            # Drop lone trailing Heel Strike (if recording ended in stance)
+            if len(HS_times_left) > 0 and len(FO_times_left) > 0:
+                if HS_times_left[-1] > FO_times_left[-1]:
+                    HS_times_left = HS_times_left[:-1]
 
             # Right Foot
             ins_right = INS(imu_right, sigma_a=0.00098, sigma_w=8.7266463e-5, T=1.0/60) 
@@ -119,9 +129,19 @@ def pyshoe_process_single_file(
             FO_indices_right = np.where(diff_right == -1)[0]
             if steps_right[0]:
                 HS_indices_right = HS_indices_right[1:]
-                FO_indices_right = FO_indices_right[1:]
+
             HS_times_right = time[HS_indices_right]
             FO_times_right = time[FO_indices_right]
+
+            # Drop lone initial Foot Off 
+            if len(FO_times_right) > 0 and len(HS_times_right) > 0:
+                if FO_times_right[0] < HS_times_right[0]:
+                    FO_times_right = FO_times_right[1:]
+                    
+            # Drop lone trailing Heel Strike
+            if len(HS_times_right) > 0 and len(FO_times_right) > 0:
+                if HS_times_right[-1] > FO_times_right[-1]:
+                    HS_times_right = HS_times_right[:-1]
 
             # Combine
             all_HS_times = np.concatenate((HS_times_left, HS_times_right))
