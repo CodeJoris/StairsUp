@@ -372,7 +372,7 @@ def optimize_detector_G(detector: str, training_clips: List[dict]):
             f1 = evaluate_G_on_clips(training_clips, detector, G)
             return 1.0 - f1
 
-        res = minimize_scalar(obj, bounds=(6.0, 10.0), method='bounded', options={'maxiter': 15})
+        res = minimize_scalar(obj, bounds=(8.0, 10.0), method='bounded', options={'maxiter': 15})
         G_opt = 10 ** res.x
     else:
         def obj(G):
