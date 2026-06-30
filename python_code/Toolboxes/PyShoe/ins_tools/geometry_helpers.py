@@ -3,7 +3,7 @@
 import numpy as np
 import math
 
-_MAX_FLOAT = np.maximum_sctype(float)
+_MAX_FLOAT = np.float64
 _FLOAT_EPS = np.finfo(float).eps
 def quat2mat(q):
     ''' Calculate rotation matrix corresponding to quaternion

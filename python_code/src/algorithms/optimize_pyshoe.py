@@ -9,22 +9,26 @@ Run from the repository `python_code/` root as:
 """
 from __future__ import annotations
 import sys
+import traceback
+import tempfile
 from pathlib import Path
 import json
-from typing import List, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 import numpy as np
 import pandas as pd
-from scipy.optimize import minimize_scalar, linear_sum_assignment
+from scipy.optimize import linear_sum_assignment
 import os
 
 
-# Ensure imports for local toolbox/processing paths when run from python_code/ root
-ROOT = Path(__file__).resolve().parents[3]  # python_code/
+ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from python_code.src.preprocessing.extractStairs import get_stair_segments
-from python_code.src.preprocessing.extractGoldenStandard import extract_golden_standard
+from python_code.src.preprocessing.extractGoldenStandard import (
+    extract_golden_standard,
+    validate_golden_standard_input,
+)
 from python_code.Toolboxes.PyShoe import pyshoe_export
 from python_code.Toolboxes.PyShoe.ins_tools.INS import INS
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -32,48 +36,152 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 DATA_PATH = ROOT / "data"
 TOL_MS = 50
 STATIONARY_BUFFER_MS = 2000
+MAX_PREDICTED_EVENTS = 300
+DATA_SET_ANCHOR = "data_set"
+
+REQUIRED_LABEL_COLS = [
+    "time",
+    "insoles_RightFoot_is_step",
+    "insoles_RightFoot_is_lifted",
+    "insoles_LeftFoot_is_step",
+    "insoles_LeftFoot_is_lifted",
+    "walk_mode",
+]
+REQUIRED_SENSOR_COLS = ["time"] + pyshoe_export.LEFT_FOOT_COLS + pyshoe_export.RIGHT_FOOT_COLS
+
+CHECKPOINT_PATH = Path(__file__).resolve().parent / "pyshoe_optimization_checkpoint.json"
+SUMMARY_PATH = Path(__file__).resolve().parent / "pyshoe_optimized_specs_stairs.json"
+
+
+def atomic_write_json(path: Path, payload: dict) -> None:
+    """
+    Write JSON atomically via a temp file in the same directory.
+
+    Uses ``os.replace`` so readers never see a partially written file.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        suffix=".json.tmp", prefix=f"{path.stem}_", dir=str(path.parent)
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+        os.replace(tmp_path, path)
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def task_key(detector: str, fold_key: str) -> str:
+    """Build a stable identifier for a detector/fold optimization task."""
+    return f"{detector}|{fold_key}"
+
+
+def parse_course_subject_from_xsens_path(path: Path) -> Tuple[str, str]:
+    """
+    Extract course and subject id from an xsens.csv path.
+
+    Expected layout: ``.../data_set/<course>/<subject>/xsens.csv``.
+
+    Raises:
+        ValueError: When the path does not match the expected layout.
+    """
+    parts = path.parts
+    try:
+        anchor_idx = parts.index(DATA_SET_ANCHOR)
+    except ValueError as exc:
+        raise ValueError(
+            f"Sensor path must contain '{DATA_SET_ANCHOR}' segment: {path}"
+        ) from exc
+    if len(parts) < anchor_idx + 4:
+        raise ValueError(f"Sensor path too short after '{DATA_SET_ANCHOR}': {path}")
+    course = parts[anchor_idx + 1]
+    sid = parts[anchor_idx + 2]
+    if parts[anchor_idx + 3] != "xsens.csv":
+        raise ValueError(f"Expected xsens.csv after subject folder: {path}")
+    return course, sid
+
+
+def validate_csv_columns(df: pd.DataFrame, required: List[str], context: str) -> None:
+    """Raise ValueError when required columns are absent."""
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"{context}: missing columns {missing}")
+
+
+def validate_clip_payload(clip_meta: dict, context: str = "clip") -> None:
+    """
+    Validate a clip dict before expensive INS evaluation.
+
+    Raises:
+        ValueError: When required keys, shapes, or column sets are invalid.
+    """
+    for key in ("sensor_df", "y_HS", "y_FO"):
+        if key not in clip_meta:
+            raise ValueError(f"{context}: missing key '{key}'")
+
+    sensor_df = clip_meta["sensor_df"]
+    if not isinstance(sensor_df, pd.DataFrame) or sensor_df.empty:
+        raise ValueError(f"{context}: sensor_df must be a non-empty DataFrame")
+    validate_csv_columns(sensor_df, REQUIRED_SENSOR_COLS, f"{context}.sensor_df")
+
+    for arr_key in ("y_HS", "y_FO"):
+        arr = clip_meta[arr_key]
+        if not isinstance(arr, np.ndarray):
+            raise ValueError(f"{context}: {arr_key} must be a numpy array")
+        if arr.ndim != 2 or arr.shape[1] != 2:
+            raise ValueError(
+                f"{context}: {arr_key} must have shape (N, 2), got {arr.shape}"
+            )
 
 
 def list_all_subject_files() -> List[Path]:
     """
-    Find all `xsens.csv` files under the configured `DATA_PATH`.
+    Find all ``xsens.csv`` files under ``DATA_PATH``.
 
     Returns:
-        List[Path]: List of file paths to sensor CSVs (may be empty).
+        Sorted list of sensor CSV paths (may be empty).
     """
-    files = list(DATA_PATH.rglob("xsens.csv"))
+    files = sorted(DATA_PATH.rglob("xsens.csv"))
     print(f"Found {len(files)} xsens.csv files under {DATA_PATH}")
     return files
 
 
-def get_stair_clips_for_subject(course: str, sid: str):
+def get_stair_clips_for_subject(course: str, sid: str) -> List[dict]:
     """
-    Extract stair-up clips' ground-truth for a single subject and course.
+    Extract stair-up clip ground truth for one subject/course pair.
 
-    This function reads `labels.csv` for the given `course` and `sid`, finds
-    continuous `stairs_up` blocks via `get_stair_segments`, extracts the golden
-    standard heel-strike (`y_HS`) and toe-off (`y_FO`) timestamps using
-    `extract_golden_standard`, and cleans edge cases (dropping incomplete
-    first/last events).
+    Reads ``labels.csv``, finds continuous ``stairs_up`` blocks, extracts
+    golden-standard HS/FO arrays, and trims only clearly incomplete gait
+    cycles at segment boundaries (FO before first HS, HS after last FO).
 
     Args:
-        course (str): Course name folder under `data_set` (e.g., "courseA").
-        sid (str): Subject id folder (e.g., "id01").
+        course: Course folder under ``data_set`` (e.g. ``courseA``).
+        sid: Subject id folder (e.g. ``id01``).
 
     Returns:
-        list[dict]: A list of clip metadata dicts with keys ``segment_id``,
-            ``start_time``, ``end_time``, ``y_HS``, ``y_FO``. Returns an empty
-            list when no stairs_up segments exist.
+        List of clip dicts with keys ``segment_id``, ``start_time``,
+        ``end_time``, ``y_HS``, ``y_FO``. Empty when no valid segments exist.
 
     Raises:
-        FileNotFoundError: If the labels file does not exist.
+        FileNotFoundError: If labels.csv is missing.
+        ValueError: If required label columns are missing.
     """
-    file_path = DATA_PATH / "data_set" / course / sid / "labels.csv"
+    file_path = DATA_PATH / DATA_SET_ANCHOR / course / sid / "labels.csv"
+    if not file_path.exists():
+        raise FileNotFoundError(f"Labels file not found: {file_path}")
+
     stair_blocks = get_stair_segments(str(file_path), target_mode="stairs_up")
     if stair_blocks.empty:
         return []
+
     print(f"Loading labels for {course}/{sid}: {file_path}")
-    data = pd.read_csv(file_path, usecols=["time", "insoles_RightFoot_is_step", "insoles_RightFoot_is_lifted", "insoles_LeftFoot_is_step", "insoles_LeftFoot_is_lifted"]) 
+    data = pd.read_csv(file_path)
+    validate_csv_columns(data, REQUIRED_LABEL_COLS, str(file_path))
+    validate_golden_standard_input(data)
+
     y_HS_full, y_FO_full = extract_golden_standard(data)
 
     clips = []
@@ -84,25 +192,22 @@ def get_stair_clips_for_subject(course: str, sid: str):
         y_HS_clip = y_HS_full[mask_HS]
         y_FO_clip = y_FO_full[mask_FO]
 
-        # Drop initial FO before first HS
         if len(y_FO_clip) > 0 and len(y_HS_clip) > 0 and y_FO_clip[0, 0] < y_HS_clip[0, 0]:
             y_FO_clip = y_FO_clip[1:]
 
-        # Drop trailing HS if after last FO
         if len(y_HS_clip) > 0 and len(y_FO_clip) > 0 and y_HS_clip[-1, 0] > y_FO_clip[-1, 0]:
             y_HS_clip = y_HS_clip[:-1]
 
-        # Safety Guard: Skip appending if this staircase doesn't contain at least one complete gait cycle
         if len(y_HS_clip) == 0 or len(y_FO_clip) == 0:
             print(f"  Skipping segment {idx} for {sid}_{course}: incomplete cycles")
             continue
 
         clips.append({
-            'segment_id': int(idx),
-            'start_time': int(block.start_time),
-            'end_time': int(block.end_time),
-            'y_HS': y_HS_clip,
-            'y_FO': y_FO_clip
+            "segment_id": int(idx),
+            "start_time": int(block.start_time),
+            "end_time": int(block.end_time),
+            "y_HS": y_HS_clip,
+            "y_FO": y_FO_clip,
         })
 
     print(f"  Extracted {len(clips)} valid stairs_up clips for {course}/{sid}")
@@ -111,82 +216,87 @@ def get_stair_clips_for_subject(course: str, sid: str):
 
 def slice_sensor_with_buffer(raw_df: pd.DataFrame, start_time: int, end_time: int) -> pd.DataFrame:
     """
-    Slice raw sensor dataframe to [start_time - buffer, end_time].
+    Slice sensor data to ``[start_time - buffer, end_time]``.
 
     Args:
-        raw_df (pd.DataFrame): Full xsens sensor dataframe with a `time` column.
-        start_time (int): Clip start time in milliseconds.
-        end_time (int): Clip end time in milliseconds.
+        raw_df: Full xsens dataframe with a ``time`` column (milliseconds).
+        start_time: Clip start in milliseconds.
+        end_time: Clip end in milliseconds.
 
     Returns:
-        pd.DataFrame: Sliced dataframe including a stationary buffer before
-            `start_time` to allow INS initialization.
+        Buffered slice including ``STATIONARY_BUFFER_MS`` before ``start_time``.
     """
     start = max(0, start_time - STATIONARY_BUFFER_MS)
-    print(f"    Slicing sensor data [{start} .. {end_time}] (buffered from {start_time}) -> {len(raw_df)} rows available")
+    print(
+        f"    Slicing sensor data [{start} .. {end_time}] "
+        f"(buffered from {start_time}) -> {len(raw_df)} rows available"
+    )
     sliced = raw_df[(raw_df.time >= start) & (raw_df.time <= end_time)].reset_index(drop=True)
     print(f"    Sliced df has {len(sliced)} rows")
     return sliced
 
 
-def get_predictions_for_clip(clip_df: pd.DataFrame, detector: str, G_val: float) -> Tuple[np.ndarray, np.ndarray]:
+def _strip_padding_artifact(event_indices: np.ndarray) -> np.ndarray:
     """
-    Run PyShoe INS baseline for a given detector and threshold on a sensor clip.
+    Remove HS/FO index 0 caused by prepending False before the ZV vector.
 
-    The function prepares left/right 6-axis IMU arrays, runs
-    ``INS.baseline(W=5, G=G_val, detector=detector)`` for each foot, and
-    extracts heel-strike (HS) and foot-off (FO) timestamps by diffing the
-    zero-velocity boolean vector.
+    Only index 0 is removed; later events are kept even when the clip
+    starts in stance.
+    """
+    if event_indices.size > 0 and event_indices[0] == 0:
+        return event_indices[1:]
+    return event_indices
+
+
+def get_predictions_for_clip(
+    clip_df: pd.DataFrame, detector: str, G_val: float
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Run PyShoe INS on a sensor clip and return predicted HS/FO times.
 
     Args:
-        clip_df (pd.DataFrame): Sensor dataframe sliced to the clip window.
-        detector (str): One of PyShoe detectors (e.g., 'shoe', 'ared').
-        G_val (float): Threshold value passed to INS (for 'shoe' this is the
-            linear G; upstream code may optimize log10-space).
+        clip_df: Sensor dataframe for one clip (must include IMU columns).
+        detector: PyShoe detector name (e.g. ``shoe``, ``ared``).
+        G_val: Threshold passed to ``INS.baseline``.
 
     Returns:
-        Tuple[np.ndarray, np.ndarray]: Sorted arrays of predicted HS times and
-            FO times (milliseconds).
-    """
-    # Prepare imu arrays as in pyshoe_export
-    RIGHT_FOOT_COLS = ['acceleration_RightFoot_x', 'acceleration_RightFoot_y', 'acceleration_RightFoot_z', 'angularVelocity_RightFoot_x', 'angularVelocity_RightFoot_y', 'angularVelocity_RightFoot_z']
-    LEFT_FOOT_COLS = ['acceleration_LeftFoot_x', 'acceleration_LeftFoot_y', 'acceleration_LeftFoot_z', 'angularVelocity_LeftFoot_x', 'angularVelocity_LeftFoot_y', 'angularVelocity_LeftFoot_z']
+        Tuple of sorted 1D arrays ``(hs_times_ms, fo_times_ms)``.
 
-    imu_left = clip_df[LEFT_FOOT_COLS].to_numpy()
-    imu_right = clip_df[RIGHT_FOOT_COLS].to_numpy()
-    time = clip_df['time'].to_numpy().squeeze()
+    Raises:
+        ValueError: If required sensor columns are missing.
+    """
+    validate_csv_columns(clip_df, REQUIRED_SENSOR_COLS, "get_predictions_for_clip")
+
+    right_cols = pyshoe_export.RIGHT_FOOT_COLS
+    left_cols = pyshoe_export.LEFT_FOOT_COLS
+
+    imu_left = clip_df[left_cols].to_numpy()
+    imu_right = clip_df[right_cols].to_numpy()
+    time = clip_df["time"].to_numpy().squeeze()
 
     print(f"    Predicting clip with detector={detector}, G={G_val:.6g}, rows={len(clip_df)}")
-    # Left
-    ins_left = INS(imu_left, sigma_a=0.00098, sigma_w=8.7266463e-5, T=1.0/pyshoe_export.SAMPLING_FREQUENCY)
-    ins_left.baseline(W=5, G=G_val, detector=detector)
-    zv_left = ins_left.zv
-    padded_left = np.insert(zv_left, 0, False).astype(int)
-    diff_left = np.diff(padded_left)
-    HS_left = np.where(diff_left == 1)[0]
-    FO_left = np.where(diff_left == -1)[0]
-    if len(zv_left) > 0 and zv_left[0]:
-        HS_left = HS_left[1:]
-        FO_left = FO_left[1:]
-    HS_times_left = time[HS_left] if HS_left.size else np.array([])
-    FO_times_left = time[FO_left] if FO_left.size else np.array([])
 
-    # Right
-    ins_right = INS(imu_right, sigma_a=0.00098, sigma_w=8.7266463e-5, T=1.0/pyshoe_export.SAMPLING_FREQUENCY)
-    ins_right.baseline(W=5, G=G_val, detector=detector)
-    zv_right = ins_right.zv
-    padded_right = np.insert(zv_right, 0, False).astype(int)
-    diff_right = np.diff(padded_right)
-    HS_right = np.where(diff_right == 1)[0]
-    FO_right = np.where(diff_right == -1)[0]
-    if len(zv_right) > 0 and zv_right[0]:
-        HS_right = HS_right[1:]
-        FO_right = FO_right[1:]
-    HS_times_right = time[HS_right] if HS_right.size else np.array([])
-    FO_times_right = time[FO_right] if FO_right.size else np.array([])
+    def events_for_foot(imu: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        ins = INS(
+            imu,
+            sigma_a=0.00098,
+            sigma_w=8.7266463e-5,
+            T=1.0 / pyshoe_export.SAMPLING_FREQUENCY,
+        )
+        ins.baseline(W=5, G=G_val, detector=detector)
+        padded = np.insert(ins.zv, 0, False).astype(int)
+        diff = np.diff(padded)
+        hs_idx = _strip_padding_artifact(np.where(diff == 1)[0])
+        fo_idx = _strip_padding_artifact(np.where(diff == -1)[0])
+        hs_times = time[hs_idx] if hs_idx.size else np.array([])
+        fo_times = time[fo_idx] if fo_idx.size else np.array([])
+        return hs_times, fo_times
 
-    all_HS = np.concatenate((HS_times_left, HS_times_right)) if HS_times_left.size or HS_times_right.size else np.array([])
-    all_FO = np.concatenate((FO_times_left, FO_times_right)) if FO_times_left.size or FO_times_right.size else np.array([])
+    hs_l, fo_l = events_for_foot(imu_left)
+    hs_r, fo_r = events_for_foot(imu_right)
+
+    all_HS = np.concatenate((hs_l, hs_r)) if hs_l.size or hs_r.size else np.array([])
+    all_FO = np.concatenate((fo_l, fo_r)) if fo_l.size or fo_r.size else np.array([])
 
     hs_sorted = np.sort(all_HS)
     fo_sorted = np.sort(all_FO)
@@ -194,23 +304,23 @@ def get_predictions_for_clip(clip_df: pd.DataFrame, detector: str, G_val: float)
     return hs_sorted, fo_sorted
 
 
-def hungarian_match(true_times: np.ndarray, pred_times: np.ndarray, tol: float = TOL_MS) -> Tuple[int, int, int]:
+def hungarian_match(
+    true_times: np.ndarray, pred_times: np.ndarray, tol: float = TOL_MS
+) -> Tuple[int, int, int]:
     """
-    Match predicted event times to true times using the Hungarian algorithm.
-
-    A prediction and a true event are considered matchable if their absolute
-    time difference is <= `tol`. Assignments with difference > `tol` are
-    forbidden. The function returns counts of true positives (TP), false
-    positives (FP) and false negatives (FN).
+    Match predicted event times to ground truth with Hungarian assignment.
 
     Args:
-        true_times (np.ndarray): 1D array of ground-truth event timestamps.
-        pred_times (np.ndarray): 1D array of predicted event timestamps.
-        tol (float): Matching tolerance in milliseconds. Default is 50 ms.
+        true_times: 1D ground-truth timestamps (ms).
+        pred_times: 1D predicted timestamps (ms).
+        tol: Maximum allowed absolute difference for a match (ms).
 
     Returns:
-        Tuple[int, int, int]: (TP, FP, FN)
+        Tuple ``(TP, FP, FN)``.
     """
+    true_times = np.asarray(true_times).ravel()
+    pred_times = np.asarray(pred_times).ravel()
+
     if len(pred_times) == 0 and len(true_times) == 0:
         return 0, 0, 0
     if len(pred_times) == 0:
@@ -218,38 +328,22 @@ def hungarian_match(true_times: np.ndarray, pred_times: np.ndarray, tol: float =
     if len(true_times) == 0:
         return 0, len(pred_times), 0
 
-    # cost matrix
     cost = np.abs(true_times[:, None] - pred_times[None, :])
-    # forbid assignments greater than tol by setting large cost
-    LARGE = 1e9
-    cost_masked = np.where(cost <= tol, cost, LARGE)
+    large = 1e9
+    cost_masked = np.where(cost <= tol, cost, large)
 
     row_ind, col_ind = linear_sum_assignment(cost_masked)
-    # count matches where cost <= tol
-    matched = 0
-    for r, c in zip(row_ind, col_ind):
-        if cost_masked[r, c] < LARGE:
-            matched += 1
+    matched = sum(1 for r, c in zip(row_ind, col_ind) if cost_masked[r, c] < large)
 
-    TP = matched
-    FP = len(pred_times) - TP
-    FN = len(true_times) - TP
-    print(f"      Matching: TP={TP}, FP={FP}, FN={FN}")
-    return TP, FP, FN
+    tp = matched
+    fp = len(pred_times) - tp
+    fn = len(true_times) - tp
+    print(f"      Matching: TP={tp}, FP={fp}, FN={fn}")
+    return tp, fp, fn
 
 
 def f1_from_counts(tp: int, fp: int, fn: int) -> float:
-    """
-    Compute F1 score given TP, FP and FN counts.
-
-    Args:
-        tp (int): True positives count.
-        fp (int): False positives count.
-        fn (int): False negatives count.
-
-    Returns:
-        float: F1 score in [0, 1]. Returns 0.0 when TP == 0.
-    """
+    """Compute F1 from confusion counts; returns 0.0 when TP is zero."""
     if tp == 0:
         return 0.0
     prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
@@ -261,306 +355,444 @@ def f1_from_counts(tp: int, fp: int, fn: int) -> float:
 
 def evaluate_G_on_clips(clips: List[dict], detector: str, G_val: float) -> float:
     """
-    Evaluate a given threshold `G_val` across a list of clips and return
-    the aggregated F1 score for heel-strike detections.
+    Aggregate F1 across clips for one detector/threshold pair.
 
     Args:
-        clips (List[dict]): List of clip metadata dicts; each must include
-            ``sensor_df`` (pd.DataFrame) and ``y_HS`` (np.ndarray).
-        detector (str): Detector name passed to PyShoe.
-        G_val (float): Threshold passed to INS.
+        clips: Clip dicts with ``sensor_df``, ``y_HS``, ``y_FO``.
+        detector: PyShoe detector name.
+        G_val: Threshold value for INS.
 
     Returns:
-        float: Aggregated F1 score across all clips.
+        Combined HS+FO F1 score in [0, 1].
+
+    Raises:
+        ValueError: When a clip payload is invalid.
     """
-    TP = FP = FN = 0
+    tp_total = fp_total = fn_total = 0
     print(f"  Evaluating detector={detector} G={G_val:.6g} on {len(clips)} clips")
+
     for i, clip_meta in enumerate(clips, 1):
-        if 'sensor_df' in clip_meta:
-            sensor_df = clip_meta['sensor_df']
-        else:
-            raise RuntimeError('clip_meta missing sensor_df')
+        validate_clip_payload(clip_meta, context=f"clip {i}")
 
-        clip_df = sensor_df
-        # Extract both true arrays
-        y_HS_true = clip_meta['y_HS'][:, 0]
-        y_FO_true = clip_meta['y_FO'][:, 0]
+        clip_df = clip_meta["sensor_df"]
+        y_HS_true = clip_meta["y_HS"][:, 0]
+        y_FO_true = clip_meta["y_FO"][:, 0]
 
-        # Get both prediction arrays
         y_HS_pred, y_FO_pred = get_predictions_for_clip(clip_df, detector, G_val)
 
-        # --- NEW SAFETY VALVE ---
-        if len(y_HS_pred) > 300 or len(y_FO_pred) > 300:
-            print(f"    [WARNING] G={G_val:.6g} caused noise explosion ({len(y_HS_pred)} steps). Rejecting.")
-            return 0.0  # Immediately punish this threshold
-        # ------------------------
+        if len(y_HS_pred) > MAX_PREDICTED_EVENTS or len(y_FO_pred) > MAX_PREDICTED_EVENTS:
+            print(
+                f"    [WARNING] G={G_val:.6g} exceeded event cap "
+                f"({len(y_HS_pred)} HS, {len(y_FO_pred)} FO). Rejecting threshold."
+            )
+            return 0.0
 
-        # Match both event types
         tp_hs, fp_hs, fn_hs = hungarian_match(y_HS_true, y_HS_pred, tol=TOL_MS)
         tp_fo, fp_fo, fn_fo = hungarian_match(y_FO_true, y_FO_pred, tol=TOL_MS)
-        
-        # Aggregate
-        TP += (tp_hs + tp_fo)
-        FP += (fp_hs + fp_fo)
-        FN += (fn_hs + fn_fo)
-        
-        print(f"    Clip {i}/{len(clips)}: TP={(tp_hs+tp_fo)}, FP={(fp_hs+fp_fo)}, FN={(fn_hs+fn_fo)}")
 
-    f1 = f1_from_counts(TP, FP, FN)
-    print(f"  -> Aggregated TP={TP}, FP={FP}, FN={FN}, F1={f1:.3f}")
+        tp_total += tp_hs + tp_fo
+        fp_total += fp_hs + fp_fo
+        fn_total += fn_hs + fn_fo
+
+        print(
+            f"    Clip {i}/{len(clips)}: "
+            f"TP={(tp_hs + tp_fo)}, FP={(fp_hs + fp_fo)}, FN={(fn_hs + fn_fo)}"
+        )
+
+    f1 = f1_from_counts(tp_total, fp_total, fn_total)
+    print(f"  -> Aggregated TP={tp_total}, FP={fp_total}, FN={fn_total}, F1={f1:.3f}")
     return f1
 
 
 def build_all_clips_with_sensor() -> List[dict]:
     """
-    Build a list of all stairs_up clips with their sliced sensor data.
+    Build stairs_up clips with buffered sensor slices attached.
 
-    Scans for all `xsens.csv` files, extracts stair-up clip ground truth using
-    `get_stair_clips_for_subject`, slices the raw sensor data with a buffer and
-    attaches the dataframe to each clip dict under the key ``sensor_df``.
+    Per-file failures are logged and skipped so one bad subject does not
+    abort the entire run.
 
     Returns:
-        List[dict]: List of clip dicts ready for evaluation/optimization.
+        List of clip dicts ready for LOSO optimization.
     """
-    clips = []
+    clips: List[dict] = []
     xsens_files = list_all_subject_files()
     print(f"Building clips from {len(xsens_files)} sensor files")
+
     for f in xsens_files:
-        sid = f.parts[-2]
-        course = f.parts[-3]
-        print(f" Processing file: {course}/{sid} -> {f}")
-        stair_clips = get_stair_clips_for_subject(course, sid)
-        if not stair_clips:
-            print(f"   No stair clips for {course}/{sid}")
+        try:
+            course, sid = parse_course_subject_from_xsens_path(f)
+        except ValueError as exc:
+            print(f" Skipping {f}: {exc}")
             continue
 
-        raw_df = pd.read_csv(f)
-        for c in stair_clips:
-            c_copy = c.copy()
-            c_copy['course'] = course
-            c_copy['id'] = sid
-            # slice raw df with buffer
-            c_copy['sensor_df'] = slice_sensor_with_buffer(raw_df, c_copy['start_time'], c_copy['end_time'])
-            clips.append(c_copy)
+        print(f" Processing file: {course}/{sid} -> {f}")
+        try:
+            stair_clips = get_stair_clips_for_subject(course, sid)
+            if not stair_clips:
+                print(f"   No stair clips for {course}/{sid}")
+                continue
+
+            raw_df = pd.read_csv(f)
+            validate_csv_columns(raw_df, REQUIRED_SENSOR_COLS, str(f))
+
+            for c in stair_clips:
+                c_copy = c.copy()
+                c_copy["course"] = course
+                c_copy["id"] = sid
+                c_copy["sensor_df"] = slice_sensor_with_buffer(
+                    raw_df, c_copy["start_time"], c_copy["end_time"]
+                )
+                validate_clip_payload(c_copy, context=f"{course}/{sid} segment {c_copy['segment_id']}")
+                clips.append(c_copy)
+        except Exception as exc:
+            print(f"   Failed to build clips for {course}/{sid}: {exc}")
+            traceback.print_exc()
 
     print(f"Built total {len(clips)} clips with sensor data attached")
     return clips
 
 
-def optimize_detector_G(detector: str, training_clips: List[dict]):
+def build_loso_folds(all_clips: List[dict]) -> List[dict]:
     """
-    Optimize the G threshold for a single detector using bounded scalar
-    minimization. The objective is `1 - F1` computed on `training_clips`.
-
-    For the 'shoe' detector the search is performed in log10-space between
-    [6, 10] and the returned G is 10**x. For the other detectors the search
-    is performed in linear space between [0.1, 50.0].
-
-    Args:
-        detector (str): Detector name.
-        training_clips (List[dict]): Clips used for optimization (must include
-            `sensor_df` and `y_HS`).
+    Build leave-one-subject-out folds with deterministic subject ordering.
 
     Returns:
-        Tuple[float, OptimizeResult]: Optimized G value and the SciPy result.
+        List of dicts with keys ``train``, ``test``, ``key`` (subject id).
     """
+    subjects = sorted({c["id"] for c in all_clips})
+    folds = []
+    for sid in subjects:
+        train_clips = [c for c in all_clips if c["id"] != sid]
+        test_clips = [c for c in all_clips if c["id"] == sid]
+        folds.append({"train": train_clips, "test": test_clips, "key": sid})
+    return folds
+
+
+def _grid_search_threshold(
+    detector: str,
+    training_clips: List[dict],
+    search_values: np.ndarray,
+    to_G,
+) -> Tuple[float, float, List[Tuple[float, float]]]:
+    """
+    Evaluate a grid of candidate thresholds and return the best F1.
+
+    Returns:
+        ``(best_G, best_f1, history)`` where history is ``[(G, f1), ...]``.
+    """
+    best_f1 = -1.0
+    best_G = float(to_G(search_values[0]))
+    history: List[Tuple[float, float]] = []
+
+    for x in search_values:
+        G = float(to_G(x))
+        f1 = evaluate_G_on_clips(training_clips, detector, G)
+        history.append((G, f1))
+        if f1 > best_f1:
+            best_f1 = f1
+            best_G = G
+
+    return best_G, best_f1, history
+
+
+def optimize_detector_G(
+    detector: str, training_clips: List[dict]
+) -> Tuple[float, dict]:
+    """
+    Optimize threshold G using coarse-to-fine grid search.
+
+    ``minimize_scalar`` is avoided because the F1 surface is jagged and
+    non-convex. A log/linear coarse grid is followed by a short local
+    refinement around the best coarse point.
+
+    Args:
+        detector: PyShoe detector name.
+        training_clips: Training clips (must pass ``validate_clip_payload``).
+
+    Returns:
+        Tuple ``(G_opt, search_info)`` where ``search_info`` records the
+        coarse/fine grids and convergence metadata.
+    """
+    if not training_clips:
+        raise ValueError(f"No training clips provided for detector {detector}")
+
+    for i, clip in enumerate(training_clips, 1):
+        validate_clip_payload(clip, context=f"training clip {i}")
+
     print(f" Optimizing detector {detector} on {len(training_clips)} training clips")
-    # objective returns 1 - F1
-    if detector == 'shoe':
-        def obj(x):
-            G = 10 ** x
-            f1 = evaluate_G_on_clips(training_clips, detector, G)
-            return 1.0 - f1
 
-        res = minimize_scalar(obj, bounds=(8.0, 10.0), method='bounded', options={'maxiter': 15})
-        G_opt = 10 ** res.x
+    if detector == "shoe":
+        coarse_x = np.linspace(8.0, 10.0, 9)
+        to_G = lambda x: 10 ** x
+        from_x = lambda g: np.log10(g)
+        fine_half_width = 0.15
+        fine_points = 7
     else:
-        def obj(G):
-            f1 = evaluate_G_on_clips(training_clips, detector, G)
-            return 1.0 - f1
+        coarse_x = np.linspace(0.1, 50.0, 20)
+        to_G = lambda x: x
+        from_x = lambda g: g
+        fine_half_width = 2.0
+        fine_points = 9
 
-        res = minimize_scalar(obj, bounds=(0.1, 50.0), method='bounded', options={'maxiter': 15})
-        G_opt = res.x
+    best_G, best_f1, coarse_history = _grid_search_threshold(
+        detector, training_clips, coarse_x, to_G
+    )
 
-    print(f"  Optimized {detector}: G*={G_opt:.6g}")
-    return G_opt, res
+    center_x = from_x(best_G)
+    fine_x = np.linspace(center_x - fine_half_width, center_x + fine_half_width, fine_points)
+    if detector == "shoe":
+        fine_x = np.clip(fine_x, 8.0, 10.0)
+    else:
+        fine_x = np.clip(fine_x, 0.1, 50.0)
 
-def process_single_fold(fold_data: dict, detector: str) -> dict:
-    """Worker function to optimize and test a single fold on a separate CPU core."""
-    key = fold_data['key']
-    train_clips = fold_data['train']
-    test_clips = fold_data['test']
-    
-    # 1. Train
-    G_star, _ = optimize_detector_G(detector, train_clips)
-    
-    # 2. Test
-    f1_test = evaluate_G_on_clips(test_clips, detector, G_star)
-    
-    return {
-        'detector': detector,
-        'fold_key': key,
-        'G_star': G_star,
-        'f1_test': f1_test
+    fine_G, fine_f1, fine_history = _grid_search_threshold(
+        detector, training_clips, fine_x, to_G
+    )
+
+    if fine_f1 >= best_f1:
+        G_opt, best_f1 = fine_G, fine_f1
+        stage = "fine"
+    else:
+        G_opt, best_f1 = best_G, best_f1
+        stage = "coarse"
+
+    search_info = {
+        "method": "coarse_to_fine_grid",
+        "best_stage": stage,
+        "best_f1": best_f1,
+        "coarse_evaluations": len(coarse_history),
+        "fine_evaluations": len(fine_history),
+        "coarse_best": max(coarse_history, key=lambda t: t[1])[0] if coarse_history else None,
     }
 
-# def main():
-#     all_clips = build_all_clips_with_sensor()
-#     if not all_clips:
-#         print('No clips found. Exiting')
-#         return
+    print(f"  Optimized {detector}: G*={G_opt:.6g} (train F1={best_f1:.3f}, stage={stage})")
+    return G_opt, search_info
 
-#     # Build True LOSO folds: isolate completely by Subject ID
-#     subjects = list(set([c['id'] for c in all_clips]))
-#     folds = []
-    
-#     for sid in subjects:
-#         train_clips = [c for c in all_clips if c['id'] != sid]
-#         test_clips = [c for c in all_clips if c['id'] == sid]
-#         folds.append({'train': train_clips, 'test': test_clips, 'key': sid})
 
-#     detectors = pyshoe_export.DETECTORS
-#     default_specs = pyshoe_export.SPECS
+def process_single_fold(fold_data: dict, detector: str) -> dict:
+    """
+    Worker entry point: optimize G on training clips and evaluate on test clips.
 
-#     optimized_results = {d: {'G_vals': [], 'f1_tests': []} for d in detectors}
+    Args:
+        fold_data: Dict with ``train``, ``test``, and ``key`` (subject id).
+        detector: PyShoe detector to optimize.
 
-#     print(f"Starting LOSO with {len(folds)} folds")
-#     for fi, fold in enumerate(folds, 1):
-#         print(f"\nFold {fi}/{len(folds)}: Hold-out Subject = {fold['key']}")
-#         for det in detectors:
-#             G_star, res = optimize_detector_G(det, fold['train'])
-#             optimized_results[det]['G_vals'].append(G_star)
+    Returns:
+        Dict with ``detector``, ``fold_key``, ``G_star``, ``f1_test``,
+        and optional ``search_info``.
 
-#             # evaluate on held-out test clips
-#             f1_test = evaluate_G_on_clips(fold['test'], det, G_star)
-#             optimized_results[det]['f1_tests'].append(f1_test)
+    Raises:
+        ValueError: When fold payloads are invalid or empty.
+    """
+    key = fold_data["key"]
+    train_clips = fold_data["train"]
+    test_clips = fold_data["test"]
 
-#             print(f"Fold {fold['key']} detector {det} -> G*={G_star:.6g}, test F1={f1_test:.3f}")
+    if not train_clips:
+        raise ValueError(f"Fold {key}/{detector}: training clips are empty")
+    if not test_clips:
+        raise ValueError(f"Fold {key}/{detector}: test clips are empty")
 
-#     # Aggregate
-#     summary = {}
-#     for det in detectors:
-#         Gs = optimized_results[det]['G_vals']
-#         f1s = optimized_results[det]['f1_tests']
-        
-#         if det == 'shoe' and Gs:
-#             # Geometric mean for log-scaled variables
-#             mean_G = float(10 ** np.mean(np.log10(Gs)))
-#         else:
-#             mean_G = float(np.mean(Gs)) if Gs else None
-            
-#         mean_f1 = float(np.mean(f1s)) if f1s else None
-        
-#         summary[det] = {
-#             'default_G': float(default_specs[det]['G']),
-#             'optimized_G_mean': mean_G,
-#             'optimized_mean_test_F1': mean_f1
-#         }
+    G_star, search_info = optimize_detector_G(detector, train_clips)
+    f1_test = evaluate_G_on_clips(test_clips, detector, G_star)
 
-#     # Print markdown table
-#     print("\n| Detector | Default G | Optimized G* (mean) | Optimized mean F1 |")
-#     print("|---|---:|---:|---:|")
-#     for det in detectors:
-#         row = summary[det]
-#         print(f"| {det} | {row['default_G']:.6g} | {row['optimized_G_mean']:.6g} | {row['optimized_mean_test_F1']:.3f} |")
+    return {
+        "detector": detector,
+        "fold_key": key,
+        "G_star": G_star,
+        "f1_test": f1_test,
+        "search_info": search_info,
+    }
 
-#     # Save JSON
-#     out_path = Path(__file__).resolve().parent / 'pyshoe_optimized_specs_stairs.json'
-#     with open(out_path, 'w') as fh:
-#         json.dump(summary, fh, indent=2)
 
-#     print(f"\nSaved optimized specs to: {out_path}")
+def empty_checkpoint() -> dict:
+    """Return a fresh checkpoint structure."""
+    return {
+        "completed": [],
+        "failed": [],
+        "optimized_results": {},
+    }
 
-def main():
+
+def load_checkpoint(path: Optional[Path] = None) -> dict:
+    """
+    Load an existing checkpoint or return an empty structure.
+
+    Returns:
+        Checkpoint dict with ``completed``, ``failed``, and
+        ``optimized_results`` keys.
+    """
+    path = path or CHECKPOINT_PATH
+    if not path.exists():
+        return empty_checkpoint()
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"Warning: could not load checkpoint ({exc}); starting fresh.")
+        return empty_checkpoint()
+
+    for key in ("completed", "failed", "optimized_results"):
+        data.setdefault(key, [] if key != "optimized_results" else {})
+    return data
+
+
+def completed_task_keys(checkpoint: dict) -> Set[str]:
+    """Return task keys already recorded as completed."""
+    return {task_key(item["detector"], item["fold_key"]) for item in checkpoint.get("completed", [])}
+
+
+def rebuild_optimized_results(completed: List[dict]) -> Dict[str, dict]:
+    """Aggregate per-detector G and F1 lists from completed fold records."""
+    results: Dict[str, dict] = {}
+    for item in completed:
+        det = item["detector"]
+        bucket = results.setdefault(det, {"G_vals": [], "f1_tests": []})
+        bucket["G_vals"].append(item["G_star"])
+        bucket["f1_tests"].append(item["f1_test"])
+    return results
+
+
+def save_checkpoint(checkpoint: dict, path: Optional[Path] = None) -> None:
+    """Persist checkpoint atomically."""
+    path = path or CHECKPOINT_PATH
+    atomic_write_json(path, checkpoint)
+
+
+def aggregate_summary(
+    detectors: List[str],
+    optimized_results: Dict[str, dict],
+    default_specs: dict,
+) -> dict:
+    """
+    Build final summary dict, tolerating detectors with zero successful folds.
+    """
+    summary = {}
+    for det in detectors:
+        bucket = optimized_results.get(det, {"G_vals": [], "f1_tests": []})
+        gs = bucket.get("G_vals", [])
+        f1s = bucket.get("f1_tests", [])
+
+        if det == "shoe" and gs:
+            mean_G = float(10 ** np.mean(np.log10(gs)))
+        elif gs:
+            mean_G = float(np.mean(gs))
+        else:
+            mean_G = None
+
+        mean_f1 = float(np.mean(f1s)) if f1s else None
+        summary[det] = {
+            "default_G": float(default_specs[det]["G"]),
+            "optimized_G_mean": mean_G,
+            "optimized_mean_test_F1": mean_f1,
+            "successful_folds": len(gs),
+        }
+    return summary
+
+
+def format_summary_cell(value: Optional[float], precision: int = 6) -> str:
+    """Format summary numeric values for markdown output."""
+    if value is None:
+        return "n/a"
+    if precision == 3:
+        return f"{value:.3f}"
+    return f"{value:.6g}"
+
+
+def print_summary_table(summary: dict) -> None:
+    """Print a markdown table that handles missing fold results gracefully."""
+    print("\n| Detector | Default G | Optimized G* (mean) | Optimized mean F1 | Folds |")
+    print("|---|---:|---:|---:|---:|")
+    for det, row in summary.items():
+        print(
+            f"| {det} | {format_summary_cell(row['default_G'])} | "
+            f"{format_summary_cell(row['optimized_G_mean'])} | "
+            f"{format_summary_cell(row['optimized_mean_test_F1'], precision=3)} | "
+            f"{row.get('successful_folds', 0)} |"
+        )
+
+
+def main() -> None:
+    """
+    Run LOSO PyShoe threshold optimization with restartable checkpointing.
+
+    Loads an existing checkpoint when present, skips completed detector/fold
+    tasks, writes incremental progress atomically, and emits a final summary
+    JSON even when some folds fail.
+    """
     all_clips = build_all_clips_with_sensor()
     if not all_clips:
-        print('No clips found. Exiting')
+        print("No clips found. Exiting")
         return
 
-    # Build True LOSO folds: isolate completely by Subject ID
-    subjects = list(set([c['id'] for c in all_clips]))
-    folds = []
-    
-    for sid in subjects:
-        train_clips = [c for c in all_clips if c['id'] != sid]
-        test_clips = [c for c in all_clips if c['id'] == sid]
-        folds.append({'train': train_clips, 'test': test_clips, 'key': sid})
-
+    folds = build_loso_folds(all_clips)
     detectors = pyshoe_export.DETECTORS
     default_specs = pyshoe_export.SPECS
 
-    optimized_results = {d: {'G_vals': [], 'f1_tests': []} for d in detectors}
+    checkpoint = load_checkpoint()
+    checkpoint["optimized_results"] = rebuild_optimized_results(checkpoint.get("completed", []))
+    done = completed_task_keys(checkpoint)
 
-    # Calculate a safe number of workers (e.g., 90% your total CPU cores)
-    # Using max(1, ...) ensures it doesn't try to assign 0 workers on small machines
     safe_cores = max(1, int(os.cpu_count() * 0.9))
-    
-    print(f"Starting True LOSO with {len(folds)} folds using {safe_cores} CPU cores...")    
+    total_tasks = len(folds) * len(detectors)
+    pending = sum(
+        1 for det in detectors for fold in folds if task_key(det, fold["key"]) not in done
+    )
 
-    
-    # --- MULTIPROCESSING DISPATCHER ---
+    print(
+        f"Starting True LOSO with {len(folds)} folds using {safe_cores} CPU cores "
+        f"({pending}/{total_tasks} tasks pending)..."
+    )
+
     tasks = []
     with ProcessPoolExecutor(max_workers=safe_cores) as executor:
         for det in detectors:
             for fold in folds:
-                # Submit task to a CPU core
+                key = task_key(det, fold["key"])
+                if key in done:
+                    print(f"Skipping completed task {key}")
+                    continue
                 future = executor.submit(process_single_fold, fold, det)
-                tasks.append(future)
-                
-        # Collect results as they finish
-        for i, future in enumerate(as_completed(tasks), 1):
+                tasks.append((future, det, fold["key"]))
+
+        for i, (future, det, fold_key) in enumerate(tasks, 1):
+            key = task_key(det, fold_key)
             try:
                 res = future.result()
-                det = res['detector']
-                
-                optimized_results[det]['G_vals'].append(res['G_star'])
-                optimized_results[det]['f1_tests'].append(res['f1_test'])
-                
-                print(f"[{i}/{len(folds) * len(detectors)}] Finished Fold {res['fold_key']} for {det} -> G*={res['G_star']:.6g}, test F1={res['f1_test']:.3f}")
-                
-                # --- NEW CHECKPOINTING ---
-                checkpoint_path = Path(__file__).resolve().parent / 'pyshoe_optimization_checkpoint.json'
-                with open(checkpoint_path, 'w') as f:
-                    json.dump(optimized_results, f, indent=2)
-                # -------------------------
+                checkpoint["completed"].append({
+                    "detector": res["detector"],
+                    "fold_key": res["fold_key"],
+                    "G_star": res["G_star"],
+                    "f1_test": res["f1_test"],
+                })
+                checkpoint["optimized_results"] = rebuild_optimized_results(checkpoint["completed"])
+                save_checkpoint(checkpoint)
 
+                print(
+                    f"[{i}/{len(tasks)}] Finished {key} -> "
+                    f"G*={res['G_star']:.6g}, test F1={res['f1_test']:.3f}"
+                )
             except Exception as exc:
-                print(f"A fold generated an exception: {exc}")
+                tb = traceback.format_exc()
+                checkpoint["failed"].append({
+                    "detector": det,
+                    "fold_key": fold_key,
+                    "error": str(exc),
+                    "traceback": tb,
+                })
+                save_checkpoint(checkpoint)
+                print(f"[{i}/{len(tasks)}] FAILED {key}: {exc}\n{tb}")
 
-    # Aggregate
-    summary = {}
-    for det in detectors:
-        Gs = optimized_results[det]['G_vals']
-        f1s = optimized_results[det]['f1_tests']
-        
-        if det == 'shoe' and Gs:
-            # Geometric mean for log-scaled variables
-            mean_G = float(10 ** np.mean(np.log10(Gs)))
-        else:
-            mean_G = float(np.mean(Gs)) if Gs else None
-            
-        mean_f1 = float(np.mean(f1s)) if f1s else None
-        
-        summary[det] = {
-            'default_G': float(default_specs[det]['G']),
-            'optimized_G_mean': mean_G,
-            'optimized_mean_test_F1': mean_f1
-        }
+    summary = aggregate_summary(detectors, checkpoint["optimized_results"], default_specs)
+    summary["checkpoint"] = {
+        "completed_tasks": len(checkpoint.get("completed", [])),
+        "failed_tasks": len(checkpoint.get("failed", [])),
+    }
 
-    # Print markdown table
-    print("\n| Detector | Default G | Optimized G* (mean) | Optimized mean F1 |")
-    print("|---|---:|---:|---:|")
-    for det in detectors:
-        row = summary[det]
-        print(f"| {det} | {row['default_G']:.6g} | {row['optimized_G_mean']:.6g} | {row['optimized_mean_test_F1']:.3f} |")
-
-    # Save JSON
-    out_path = Path(__file__).resolve().parent / 'pyshoe_optimized_specs_stairs.json'
-    with open(out_path, 'w') as fh:
-        json.dump(summary, fh, indent=2)
-
-    print(f"\nSaved optimized specs to: {out_path}")
+    print_summary_table(summary)
+    atomic_write_json(SUMMARY_PATH, summary)
+    print(f"\nSaved optimized specs to: {SUMMARY_PATH}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

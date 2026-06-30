@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import sys
 import numpy as np
 from pathlib import Path
@@ -29,7 +31,7 @@ def pyshoe_process_single_file(
     segment: pd.DataFrame, 
     course: str, 
     id: str, 
-    clip_id: int,  # Added to separate staircase events
+    clip_id: int,
     y_HS_true: pd.DataFrame | np.ndarray, 
     y_FO_true: pd.DataFrame | np.ndarray, 
     data_path: Path

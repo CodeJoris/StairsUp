@@ -1,2 +1,5 @@
-numpy
+numpy==1.26.4
 pandas
+scipy==1.13.1
+joblib
+pytest
