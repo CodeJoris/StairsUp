@@ -18,6 +18,10 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import linear_sum_assignment
 import os
+import pickle
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -34,10 +38,12 @@ from python_code.Toolboxes.PyShoe.ins_tools.INS import INS
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 DATA_PATH = ROOT / "data"
-TOL_MS = 50
+TOL_MS = 300
 STATIONARY_BUFFER_MS = 2000
 MAX_PREDICTED_EVENTS = 300
 DATA_SET_ANCHOR = "data_set"
+CLIPS_CACHE_PATH = Path(__file__).resolve().parent / "stair_clips_cache.pkl"
+PLOTS_ON = True
 
 REQUIRED_LABEL_COLS = [
     "time",
@@ -52,6 +58,54 @@ REQUIRED_SENSOR_COLS = ["time"] + pyshoe_export.LEFT_FOOT_COLS + pyshoe_export.R
 CHECKPOINT_PATH = Path(__file__).resolve().parent / "pyshoe_optimization_checkpoint.json"
 SUMMARY_PATH = Path(__file__).resolve().parent / "pyshoe_optimized_specs_stairs.json"
 
+def plot_predictions_vs_truth(clip_df, y_HS_true, y_HS_pred, y_FO_true, y_FO_pred, G_val, course, sid, detector):
+    """
+    Overlays predicted gait events onto raw IMU data to visually debug F1 scores.
+    """
+    plt.figure(figsize=(14, 6))
+    
+    # Plot a reference sensor signal (Right Foot Z-axis acceleration)
+    time = clip_df['time']
+    if 'acceleration_RightFoot_z' in clip_df.columns:
+        acc_z = clip_df['acceleration_RightFoot_z']
+        plt.plot(time, acc_z, label='Right Foot Accel Z', color='lightgray', alpha=0.8)
+        
+    # Safely extract 1D time arrays (assuming column 0 is time in ms)
+    hs_true = y_HS_true[:, 0] if y_HS_true.ndim == 2 else y_HS_true
+    hs_pred = y_HS_pred[:, 0] if y_HS_pred.ndim == 2 else y_HS_pred
+    fo_true = y_FO_true[:, 0] if y_FO_true.ndim == 2 else y_FO_true
+    fo_pred = y_FO_pred[:, 0] if y_FO_pred.ndim == 2 else y_FO_pred
+
+    # Plot Ground Truth (Solid Lines)
+    for t in hs_true:
+        plt.axvline(x=t, color='green', linestyle='-', linewidth=0.5, alpha = 0.7,
+                    label='True HS' if t == hs_true[0] else "")
+    for t in fo_true:
+        plt.axvline(x=t, color='blue', linestyle='-', linewidth=0.5, alpha = 0.7,
+                    label='True FO' if t == fo_true[0] else "")
+
+    # Plot Predictions (Dashed Lines)
+    for t in hs_pred:
+        plt.axvline(x=t, color='limegreen', linestyle='--', linewidth=0.5, alpha = 0.7,
+                    label='Pred HS' if len(hs_pred) > 0 and t == hs_pred[0] else "")
+    for t in fo_pred:
+        plt.axvline(x=t, color='dodgerblue', linestyle='--', linewidth=0.5, alpha = 0.7,
+                    label='Pred FO' if len(fo_pred) > 0 and t == fo_pred[0] else "")
+
+    plt.title(f"PyShoe Predictions vs. Truth (G = {G_val:.3f})", fontsize=14)
+    plt.xlabel('Time (ms)', fontsize=12)
+    plt.ylabel('Acceleration (m/s²)', fontsize=12)
+    
+    # Deduplicate legend labels
+    handles, labels = plt.gca().get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+    plt.legend(by_label.values(), by_label.keys(), loc='upper right')
+    
+    plt.tight_layout()
+    file_name = f"{course}_{sid}_G_{G_val:.3f}.pdf"
+    save_path = Path(__file__).resolve().parent / "plots" / detector / file_name
+    plt.savefig(save_path)
+    plt.close('all')
 
 def atomic_write_json(path: Path, payload: dict) -> None:
     """
@@ -186,8 +240,9 @@ def get_stair_clips_for_subject(course: str, sid: str) -> List[dict]:
 
     clips = []
     for idx, block in stair_blocks.iterrows():
-        mask_HS = (y_HS_full[:, 0] >= block.start_time) & (y_HS_full[:, 0] <= block.end_time)
-        mask_FO = (y_FO_full[:, 0] >= block.start_time) & (y_FO_full[:, 0] <= block.end_time)
+        start_buffered = max(0, block.start_time - STATIONARY_BUFFER_MS)
+        mask_HS = (y_HS_full[:, 0] >= start_buffered) & (y_HS_full[:, 0] <= block.end_time)
+        mask_FO = (y_FO_full[:, 0] >= start_buffered) & (y_FO_full[:, 0] <= block.end_time)
 
         y_HS_clip = y_HS_full[mask_HS]
         y_FO_clip = y_FO_full[mask_FO]
@@ -290,16 +345,39 @@ def get_predictions_for_clip(
         fo_idx = _strip_padding_artifact(np.where(diff == -1)[0])
         hs_times = time[hs_idx] if hs_idx.size else np.array([])
         fo_times = time[fo_idx] if fo_idx.size else np.array([])
+
+        # Drop lone initial Foot Off (if recording started mid-swing)
+        if len(fo_times) > 0 and len(hs_times) > 0:
+            if fo_times[0] < hs_times[0]:
+                fo_times = fo_times[1:]
+                
+        # Drop lone trailing Heel Strike (if recording ended in stance)
+        if len(hs_times) > 0 and len(fo_times) > 0:
+            if hs_times[-1] > fo_times[-1]:
+                hs_times = hs_times[:-1]
+
         return hs_times, fo_times
 
     hs_l, fo_l = events_for_foot(imu_left)
     hs_r, fo_r = events_for_foot(imu_right)
 
-    all_HS = np.concatenate((hs_l, hs_r)) if hs_l.size or hs_r.size else np.array([])
-    all_FO = np.concatenate((fo_l, fo_r)) if fo_l.size or fo_r.size else np.array([])
+    # Helper to create Nx2 arrays: [time_ms, foot_label]
+    def tag_foot(times, label):
+        if times.size == 0: return np.empty((0, 2))
+        return np.column_stack((times, np.full(len(times), label)))
 
-    hs_sorted = np.sort(all_HS)
-    fo_sorted = np.sort(all_FO)
+    hs_l_tagged = tag_foot(hs_l, 1)
+    hs_r_tagged = tag_foot(hs_r, 0)
+    fo_l_tagged = tag_foot(fo_l, 1)
+    fo_r_tagged = tag_foot(fo_r, 0)
+
+    # Combine left and right
+    all_HS = np.vstack((hs_l_tagged, hs_r_tagged)) if len(hs_l) or len(hs_r) else np.empty((0, 2))
+    all_FO = np.vstack((fo_l_tagged, fo_r_tagged)) if len(fo_l) or len(fo_r) else np.empty((0, 2))
+
+    # Sort sequentially by time (column 0)
+    hs_sorted = all_HS[all_HS[:, 0].argsort()] if len(all_HS) else all_HS
+    fo_sorted = all_FO[all_FO[:, 0].argsort()] if len(all_FO) else all_FO
     print(f"    Predicted {len(hs_sorted)} HS and {len(fo_sorted)} FO events")
     return hs_sorted, fo_sorted
 
@@ -352,6 +430,23 @@ def f1_from_counts(tp: int, fp: int, fn: int) -> float:
         return 0.0
     return 2 * (prec * rec) / (prec + rec)
 
+def f_beta_from_counts(tp: int, fp: int, fn: int, beta: float = 2.0) -> float:
+    """
+    Compute the F-beta score. 
+    beta > 1 penalizes False Negatives more heavily (emphasizes recall).
+    beta = 2 makes recall twice as important as precision.
+    """
+    if tp == 0:
+        return 0.0
+        
+    prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    rec = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    
+    if prec + rec == 0:
+        return 0.0
+        
+    beta_sq = beta ** 2
+    return (1 + beta_sq) * (prec * rec) / ((beta_sq * prec) + rec)
 
 def evaluate_G_on_clips(clips: List[dict], detector: str, G_val: float) -> float:
     """
@@ -373,12 +468,34 @@ def evaluate_G_on_clips(clips: List[dict], detector: str, G_val: float) -> float
 
     for i, clip_meta in enumerate(clips, 1):
         validate_clip_payload(clip_meta, context=f"clip {i}")
-
         clip_df = clip_meta["sensor_df"]
-        y_HS_true = clip_meta["y_HS"][:, 0]
-        y_FO_true = clip_meta["y_FO"][:, 0]
 
+        y_HS_true = clip_meta["y_HS"]
+        y_FO_true = clip_meta["y_FO"]
         y_HS_pred, y_FO_pred = get_predictions_for_clip(clip_df, detector, G_val)
+
+        if len(y_HS_pred) > MAX_PREDICTED_EVENTS or len(y_FO_pred) > MAX_PREDICTED_EVENTS:
+            return 0.0
+
+        # Helper to split an Nx2 array into Right (0) and Left (1) 1D time arrays
+        def split_feet(arr):
+            if len(arr) == 0: return np.array([]), np.array([])
+            return arr[arr[:, 1] == 0][:, 0], arr[arr[:, 1] == 1][:, 0]
+
+        true_hs_r, true_hs_l = split_feet(y_HS_true)
+        true_fo_r, true_fo_l = split_feet(y_FO_true)
+        pred_hs_r, pred_hs_l = split_feet(y_HS_pred)
+        pred_fo_r, pred_fo_l = split_feet(y_FO_pred)
+
+        # Only plot the very first clip of a specific G value to avoid spamming 100 plots
+        if i == 1 and PLOTS_ON:
+            plot_predictions_vs_truth(
+                clip_df, 
+                true_hs_r, pred_hs_r, 
+                true_fo_r, pred_fo_r, 
+                G_val, clip_meta["course"], clip_meta["id"], detector
+            )
+        # ----------------------------
 
         if len(y_HS_pred) > MAX_PREDICTED_EVENTS or len(y_FO_pred) > MAX_PREDICTED_EVENTS:
             print(
@@ -387,19 +504,25 @@ def evaluate_G_on_clips(clips: List[dict], detector: str, G_val: float) -> float
             )
             return 0.0
 
-        tp_hs, fp_hs, fn_hs = hungarian_match(y_HS_true, y_HS_pred, tol=TOL_MS)
-        tp_fo, fp_fo, fn_fo = hungarian_match(y_FO_true, y_FO_pred, tol=TOL_MS)
+        # Match Right Foot
+        tp_hs_r, fp_hs_r, fn_hs_r = hungarian_match(true_hs_r, pred_hs_r, tol=TOL_MS)
+        tp_fo_r, fp_fo_r, fn_fo_r = hungarian_match(true_fo_r, pred_fo_r, tol=TOL_MS)
+        
+        # Match Left Foot
+        tp_hs_l, fp_hs_l, fn_hs_l = hungarian_match(true_hs_l, pred_hs_l, tol=TOL_MS)
+        tp_fo_l, fp_fo_l, fn_fo_l = hungarian_match(true_fo_l, pred_fo_l, tol=TOL_MS)
 
-        tp_total += tp_hs + tp_fo
-        fp_total += fp_hs + fp_fo
-        fn_total += fn_hs + fn_fo
+        # Combine totals
+        tp_total += tp_hs_r + tp_fo_r + tp_hs_l + tp_fo_l
+        fp_total += fp_hs_r + fp_fo_r + fp_hs_l + fp_fo_l
+        fn_total += fn_hs_r + fn_fo_r + fn_hs_l + fn_fo_l
 
         print(
             f"    Clip {i}/{len(clips)}: "
-            f"TP={(tp_hs + tp_fo)}, FP={(fp_hs + fp_fo)}, FN={(fn_hs + fn_fo)}"
+            f"TP={(tp_hs_r + tp_fo_r + tp_hs_l + tp_fo_l)}, FP={(fp_hs_r + fp_fo_r + fp_hs_l + fp_fo_l)}, FN={(fn_hs_r + fn_fo_r + fn_hs_l + fn_fo_l)}"
         )
 
-    f1 = f1_from_counts(tp_total, fp_total, fn_total)
+    f1 = f_beta_from_counts(tp_total, fp_total, fn_total, beta=2.0)
     print(f"  -> Aggregated TP={tp_total}, FP={fp_total}, FN={fn_total}, F1={f1:.3f}")
     return f1
 
@@ -414,6 +537,13 @@ def build_all_clips_with_sensor() -> List[dict]:
     Returns:
         List of clip dicts ready for LOSO optimization.
     """
+    # --- CHECK FOR CACHE ---
+    if CLIPS_CACHE_PATH.exists():
+        print(f"Loading cached clips from {CLIPS_CACHE_PATH}...")
+        with open(CLIPS_CACHE_PATH, "rb") as f:
+            return pickle.load(f)
+    # -----------------------
+
     clips: List[dict] = []
     xsens_files = list_all_subject_files()
     print(f"Building clips from {len(xsens_files)} sensor files")
@@ -449,6 +579,13 @@ def build_all_clips_with_sensor() -> List[dict]:
             traceback.print_exc()
 
     print(f"Built total {len(clips)} clips with sensor data attached")
+
+    # --- SAVE TO CACHE ---
+    print(f"Saving clips to cache at {CLIPS_CACHE_PATH}...")
+    with open(CLIPS_CACHE_PATH, "wb") as f:
+        pickle.dump(clips, f)
+    # ---------------------
+
     return clips
 
 
@@ -522,13 +659,19 @@ def optimize_detector_G(
     print(f" Optimizing detector {detector} on {len(training_clips)} training clips")
 
     if detector == "shoe":
-        coarse_x = np.linspace(8.0, 10.0, 9)
+        coarse_x = np.linspace(9.0, 11.0, 9)
         to_G = lambda x: 10 ** x
         from_x = lambda g: np.log10(g)
         fine_half_width = 0.15
         fine_points = 7
+    # elif detector == "mbgtd":
+    #     coarse_x = np.linspace(40.0, 100.0, 20)  # Search from 40 to 100
+    #     to_G = lambda x: x
+    #     from_x = lambda g: g
+    #     fine_half_width = 3.0  # Slightly wider fine search given the large range
+    #     fine_points = 9
     else:
-        coarse_x = np.linspace(0.1, 50.0, 20)
+        coarse_x = np.linspace(0.1, 200.0, 20) 
         to_G = lambda x: x
         from_x = lambda g: g
         fine_half_width = 2.0
@@ -542,8 +685,10 @@ def optimize_detector_G(
     fine_x = np.linspace(center_x - fine_half_width, center_x + fine_half_width, fine_points)
     if detector == "shoe":
         fine_x = np.clip(fine_x, 8.0, 10.0)
+    # elif detector == "mbgtd":
+    #     fine_x = np.clip(fine_x, 40.0, 100.0)
     else:
-        fine_x = np.clip(fine_x, 0.1, 50.0)
+        fine_x = np.clip(fine_x, 0.1, 200.0)
 
     fine_G, fine_f1, fine_history = _grid_search_threshold(
         detector, training_clips, fine_x, to_G
@@ -704,6 +849,9 @@ def print_summary_table(summary: dict) -> None:
     print("\n| Detector | Default G | Optimized G* (mean) | Optimized mean F1 | Folds |")
     print("|---|---:|---:|---:|---:|")
     for det, row in summary.items():
+        if det == "checkpoint":
+            continue
+
         print(
             f"| {det} | {format_summary_cell(row['default_G'])} | "
             f"{format_summary_cell(row['optimized_G_mean'])} | "
@@ -733,7 +881,7 @@ def main() -> None:
     checkpoint["optimized_results"] = rebuild_optimized_results(checkpoint.get("completed", []))
     done = completed_task_keys(checkpoint)
 
-    safe_cores = max(1, int(os.cpu_count() * 0.9))
+    safe_cores = max(1, int(os.cpu_count() // 2))
     total_tasks = len(folds) * len(detectors)
     pending = sum(
         1 for det in detectors for fold in folds if task_key(det, fold["key"]) not in done
