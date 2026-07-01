@@ -44,6 +44,7 @@ MAX_PREDICTED_EVENTS = 300
 DATA_SET_ANCHOR = "data_set"
 CLIPS_CACHE_PATH = Path(__file__).resolve().parent / "stair_clips_cache.pkl"
 PLOTS_ON = True
+MIN_STANCE_MS = 250.0  # Safe threshold (real stance is ~600ms+) tweak based on sampling frequency this was made to be about 15 frames at 60Hz
 
 REQUIRED_LABEL_COLS = [
     "time",
@@ -356,6 +357,18 @@ def get_predictions_for_clip(
             if hs_times[-1] > fo_times[-1]:
                 hs_times = hs_times[:-1]
 
+        # Enforce a Minimum Stance Time to void rapid false-positive flickers
+        if len(hs_times) == len(fo_times) and len(hs_times) > 0:
+            # Calculate the duration the foot was "on the ground" for each step
+            stance_durations = fo_times - hs_times
+            
+            # Create a boolean mask of only the steps that lasted long enough
+            valid_mask = stance_durations >= MIN_STANCE_MS
+            
+            # Apply the mask to instantly drop the glitches from both arrays
+            hs_times = hs_times[valid_mask]
+            fo_times = fo_times[valid_mask]
+
         return hs_times, fo_times
 
     hs_l, fo_l = events_for_foot(imu_left)
@@ -659,7 +672,7 @@ def optimize_detector_G(
     print(f" Optimizing detector {detector} on {len(training_clips)} training clips")
 
     if detector == "shoe":
-        coarse_x = np.linspace(9.0, 11.0, 9)
+        coarse_x = np.linspace(9.0, 10.0, 20)
         to_G = lambda x: 10 ** x
         from_x = lambda g: np.log10(g)
         fine_half_width = 0.15
