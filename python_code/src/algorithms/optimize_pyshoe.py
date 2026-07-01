@@ -6,6 +6,10 @@ Run from the repository `python_code/` root as:
 
     python -m src.algorithms.optimize_pyshoe
 
+Use the -d switch to only optimize one detector
+
+    python -m src.algorithms.optimize_pyshoe -d mbgtd
+
 """
 from __future__ import annotations
 import sys
@@ -22,6 +26,7 @@ import pickle
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import argparse
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -38,13 +43,13 @@ from python_code.Toolboxes.PyShoe.ins_tools.INS import INS
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 DATA_PATH = ROOT / "data"
-TOL_MS = 300
+TOL_MS = 150
 STATIONARY_BUFFER_MS = 2000
 MAX_PREDICTED_EVENTS = 300
 DATA_SET_ANCHOR = "data_set"
 CLIPS_CACHE_PATH = Path(__file__).resolve().parent / "stair_clips_cache.pkl"
 PLOTS_ON = True
-MIN_STANCE_MS = 250.0  # Safe threshold (real stance is ~600ms+) tweak based on sampling frequency this was made to be about 15 frames at 60Hz
+MIN_STANCE_MS = 350.0  # Safe threshold (real stance is ~600ms+) tweak based on sampling frequency this was made to be more than 15 frames at 60Hz
 
 REQUIRED_LABEL_COLS = [
     "time",
@@ -881,6 +886,22 @@ def main() -> None:
     tasks, writes incremental progress atomically, and emits a final summary
     JSON even when some folds fail.
     """
+    parser = argparse.ArgumentParser(description="Optimize PyShoe G-values.")
+    parser.add_argument(
+        "-d", "--detector", 
+        type=str, 
+        choices=["shoe", "ared", "amvd", "mbgtd", "all"], 
+        default="all", 
+        help="Run optimization for a specific detector (default: all)"
+    )
+    args = parser.parse_args()
+
+    # Determine which detectors to process
+    all_detectors = ["shoe", "ared", "amvd", "mbgtd"]
+    target_detectors = all_detectors if args.detector == "all" else [args.detector]
+    
+    print(f"Starting optimization for: {', '.join(target_detectors)}")
+
     all_clips = build_all_clips_with_sensor()
     if not all_clips:
         print("No clips found. Exiting")
@@ -907,7 +928,7 @@ def main() -> None:
 
     tasks = []
     with ProcessPoolExecutor(max_workers=safe_cores) as executor:
-        for det in detectors:
+        for det in target_detectors:
             for fold in folds:
                 key = task_key(det, fold["key"])
                 if key in done:

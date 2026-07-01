@@ -22,30 +22,25 @@ def get_ytrue_for_stairs(course: str, id: str) -> list:
     time windows spent walking up stairs using `get_stair_segments`, parses the step 
     annotation columns, and slices them into isolated dictionary packages.
 
-    Parameters:
-    -----------
-    course : str
-        The name of the course or environment directory (e.g., 'courseA').
-    id : str
-        The subject identifier string matching the directory structure (e.g., 'id01').
+    Args:
+        course: (str) The name of the course or environment directory (e.g., 'courseA').
+        id: (str) The subject identifier string matching the directory structure (e.g., 'id01').
 
     Returns:
-    --------
-    list of dict\n
-        A list of dictionaries, where each dictionary represents an isolated continuous\n
-        staircase climb segment. Returns an empty list [] if no 'stairs_up' segments\n
-        are present in the trial. Each dictionary contains:\n
-            - `segment_id` (int): The sequential index of the staircase climb.\n
-            - `start_time` (float/int): The starting timestamp (ms) of the climb.\n
-            - `end_time` (float/int): The ending timestamp (ms) of the climb.\n
-            - `y_HS` (pd.DataFrame/Series): Sliced heel strike ground truth matching the window.\n
-            - `y_FO` (pd.DataFrame/Series): Sliced toe off ground truth matching the window.\n
+        list of dict\n
+            A list of dictionaries, where each dictionary represents an isolated continuous\n
+            staircase climb segment. Returns an empty list [] if no 'stairs_up' segments\n
+            are present in the trial. Each dictionary contains:\n
+                - `segment_id` (int): The sequential index of the staircase climb.\n
+                - `start_time` (float/int): The starting timestamp (ms) of the climb.\n
+                - `end_time` (float/int): The ending timestamp (ms) of the climb.\n
+                - `y_HS` (pd.DataFrame/Series): Sliced heel strike ground truth matching the window.\n
+                - `y_FO` (pd.DataFrame/Series): Sliced toe off ground truth matching the window.\n
 
     Raises:
-    -------
-    Exception
-        Catches and prints any underlying parsing errors (e.g., missing columns, 
-        invalid file paths) and returns None.
+        Exception
+            Catches and prints any underlying parsing errors (e.g., missing columns, 
+            invalid file paths) and returns None.
     """
     try:
         file_path = DATA_PATH / "data_set" / course / id / "labels.csv"
@@ -68,31 +63,39 @@ def get_ytrue_for_stairs(course: str, id: str) -> list:
             mask_HS = (y_HS_full[:, 0] >= block.start_time) & (y_HS_full[:, 0] <= block.end_time)
             mask_FO = (y_FO_full[:, 0] >= block.start_time) & (y_FO_full[:, 0] <= block.end_time)
 
-            y_HS_clip = y_HS_full[mask_HS]
-            y_FO_clip = y_FO_full[mask_FO]
+            hs_window = y_HS_full[mask_HS]
+            fo_window = y_FO_full[mask_FO]
 
-            # Clean up
-            # If the first Foot Off happens BEFORE the first Heel Strike, drop that lone Foot Off.
-            if len(y_FO_clip) > 0 and len(y_HS_clip) > 0:
-                if y_FO_clip[0, 0] < y_HS_clip[0, 0]:
-                    y_FO_clip = y_FO_clip[1:]  # Drop the incomplete initial toe-off
+            # Helper to separate the Nx2 array into Right (0) and Left (1)
+            def split_feet(arr):
+                if len(arr) == 0: return np.array([]), np.array([])
+                return arr[arr[:, 1] == 0][:, 0], arr[arr[:, 1] == 1][:, 0]
 
-            # 2. Ensure the clip ends with a Toe Off
-            # If the last Heel Strike happens AFTER the last Foot Off, drop that lone Heel Strike.
-            if len(y_HS_clip) > 0 and len(y_FO_clip) > 0:
-                if y_HS_clip[-1, 0] > y_FO_clip[-1, 0]:
-                    y_HS_clip = y_HS_clip[:-1]  # Drop the incomplete trailing heel-strike
+            true_hs_r, true_hs_l = split_feet(hs_window)
+            true_fo_r, true_fo_l = split_feet(fo_window)
 
-            # Safety Guard: Skip appending if this staircase doesn't contain at least one complete gait cycle
-            if len(y_HS_clip) == 0 or len(y_FO_clip) == 0:
+            def clean_boundaries(hs, fo):
+                if len(fo) > 0 and len(hs) > 0 and fo[0] < hs[0]:
+                    fo = fo[1:]
+                if len(hs) > 0 and len(fo) > 0 and hs[-1] > fo[-1]:
+                    hs = hs[:-1]
+                return hs, fo
+
+            true_hs_r, true_fo_r = clean_boundaries(true_hs_r, true_fo_r)
+            true_hs_l, true_fo_l = clean_boundaries(true_hs_l, true_fo_l)
+        
+            # Safety Guard: Skip if NO steps exist on either foot
+            if len(true_hs_r) == 0 and len(true_hs_l) == 0:
                 continue
 
             staircase_clips_ground_truth.append({
                 'segment_id': idx,
                 'start_time': block.start_time,
                 'end_time': block.end_time,
-                'y_HS': y_HS_clip,
-                'y_FO': y_FO_clip
+                'y_HS_r': true_hs_r,
+                'y_FO_r': true_fo_r,
+                'y_HS_l': true_hs_l,
+                'y_FO_l': true_fo_l
             })
 
         return staircase_clips_ground_truth
@@ -143,8 +146,14 @@ def process_file_all_toolboxes(file_path: Path) -> str:
         # or pass the pre-sliced `file_path` clips you exported earlier!
         sensor_clip = raw_sensor_df[(raw_sensor_df.time >= clip['start_time']) & 
                                     (raw_sensor_df.time <= clip['end_time'])]
-        res_kielmat = kielmat_process_single_file(sensor_clip, course, id, clip['segment_id'], clip['y_HS'], clip['y_FO'], DATA_PATH)
-        res_pyshoe = pyshoe_process_single_file(sensor_clip, course, id, clip['segment_id'], clip['y_HS'], clip['y_FO'], DATA_PATH)
+        # res_kielmat = kielmat_process_single_file(sensor_clip, course, id, clip['segment_id'], clip['y_HS'], clip['y_FO'], DATA_PATH)
+        res_kielmat = "Not on"
+        res_pyshoe = pyshoe_process_single_file(
+            sensor_clip, course, id, clip['segment_id'], 
+            clip['y_HS_r'], clip['y_FO_r'], 
+            clip['y_HS_l'], clip['y_FO_l'], 
+            DATA_PATH
+        )
         
         results_summary.append(f"Clip {clip['segment_id']}: KielMAT [{res_kielmat}] | PyShoe [{res_pyshoe}]")
         
