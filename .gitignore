@@ -10,3 +10,5 @@ notebook/
 
 .github
 python_code/optimization_log.txt
+python_code/src/algorithms/plots
+*.pkl
