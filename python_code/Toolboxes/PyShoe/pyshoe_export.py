@@ -20,11 +20,38 @@ TARGET_COLS = ["time"] + RIGHT_FOOT_COLS + LEFT_FOOT_COLS
 SAMPLING_FREQUENCY = 60
 DETECTORS = ['shoe', 'ared', 'amvd', 'mbgtd']
 SPECS = {  # G values are sensor/walking surface dependent more at https://github.com/utiasSTARS/pyshoe/tree/master
-    'shoe': {"G":2e8},
+    'shoe': {"G":2.45e8},
     'ared': {"G":2.0},
     'amvd': {"G":7},
     'mbgtd': {"G":10},
 }
+
+def clean_gait_events(hs_times: np.ndarray, fo_times: np.ndarray, sampling_freq: float) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Cleans raw PyShoe events by dropping incomplete boundary steps and 
+    enforcing a minimum stance time to void false-positive flickers.
+    """
+    # 1. Drop lone initial Foot Off (mid-swing start)
+    if len(fo_times) > 0 and len(hs_times) > 0:
+        if fo_times[0] < hs_times[0]:
+            fo_times = fo_times[1:]
+            
+    # 2. Drop lone trailing Heel Strike (stance-phase end)
+    if len(hs_times) > 0 and len(fo_times) > 0:
+        if hs_times[-1] > fo_times[-1]:
+            hs_times = hs_times[:-1]
+
+    # 3. Enforce Minimum Stance Time
+    MIN_STANCE_FRAMES = 15  # Adjust if needed
+    MIN_STANCE_MS = (MIN_STANCE_FRAMES / sampling_freq) * 1000.0
+    
+    if len(hs_times) == len(fo_times) and len(hs_times) > 0:
+        stance_durations = fo_times - hs_times
+        valid_mask = stance_durations >= MIN_STANCE_MS
+        hs_times = hs_times[valid_mask]
+        fo_times = fo_times[valid_mask]
+        
+    return hs_times, fo_times
 
 
 def pyshoe_process_single_file(
@@ -32,8 +59,10 @@ def pyshoe_process_single_file(
     course: str, 
     id: str, 
     clip_id: int,
-    y_HS_true: pd.DataFrame | np.ndarray, 
-    y_FO_true: pd.DataFrame | np.ndarray, 
+    true_hs_r: pd.DataFrame | np.ndarray, 
+    true_fo_r: pd.DataFrame | np.ndarray, 
+    true_hs_l: pd.DataFrame | np.ndarray, 
+    true_fo_l: pd.DataFrame | np.ndarray, 
     data_path: Path
 ) -> str:
     """
@@ -58,10 +87,10 @@ def pyshoe_process_single_file(
     id : str
         The subject identifier string matching the directory layout (e.g., 'subj_01').
         
-    y_HS_true : pd.DataFrame or pd.Series or np.ndarray
+    true_hs_r : pd.DataFrame or pd.Series or np.ndarray
         The ground truth heel strike annotations for this specific segment window.
         
-    y_FO_true : pd.DataFrame or pd.Series or np.ndarray
+    true_fo_r : pd.DataFrame or pd.Series or np.ndarray
         The ground truth foot off annotations for this specific segment window.
         
     data_path : pathlib.Path
@@ -110,16 +139,6 @@ def pyshoe_process_single_file(
             HS_times_left = time[HS_indices_left]
             FO_times_left = time[FO_indices_left]
 
-            # Drop lone initial Foot Off (if recording started mid-swing)
-            if len(FO_times_left) > 0 and len(HS_times_left) > 0:
-                if FO_times_left[0] < HS_times_left[0]:
-                    FO_times_left = FO_times_left[1:]
-                    
-            # Drop lone trailing Heel Strike (if recording ended in stance)
-            if len(HS_times_left) > 0 and len(FO_times_left) > 0:
-                if HS_times_left[-1] > FO_times_left[-1]:
-                    HS_times_left = HS_times_left[:-1]
-
             # Right Foot
             ins_right = INS(imu_right, sigma_a=0.00098, sigma_w=8.7266463e-5, T=1.0/60) 
             ins_right.baseline(W=5, G=G_val, detector=detector_name)
@@ -135,24 +154,38 @@ def pyshoe_process_single_file(
             HS_times_right = time[HS_indices_right]
             FO_times_right = time[FO_indices_right]
 
-            # Drop lone initial Foot Off 
-            if len(FO_times_right) > 0 and len(HS_times_right) > 0:
-                if FO_times_right[0] < HS_times_right[0]:
-                    FO_times_right = FO_times_right[1:]
-                    
-            # Drop lone trailing Heel Strike
-            if len(HS_times_right) > 0 and len(FO_times_right) > 0:
-                if HS_times_right[-1] > FO_times_right[-1]:
-                    HS_times_right = HS_times_right[:-1]
+            # Clean the raw events for both feet
+            HS_times_left, FO_times_left = clean_gait_events(HS_times_left, FO_times_left, SAMPLING_FREQUENCY)
+            HS_times_right, FO_times_right = clean_gait_events(HS_times_right, FO_times_right, SAMPLING_FREQUENCY)
 
             # Combine
-            all_HS_times = np.concatenate((HS_times_left, HS_times_right))
-            all_FO_times = np.concatenate((FO_times_left, FO_times_right))
+            def tag_foot(times, label):
+                if len(times) == 0: return np.empty((0, 2))
+                return np.column_stack((times, np.full(len(times), label)))
+
+            pred_hs_r = tag_foot(HS_times_right, 0)
+            pred_hs_l = tag_foot(HS_times_left, 1)
+            pred_fo_r = tag_foot(FO_times_right, 0)
+            pred_fo_l = tag_foot(FO_times_left, 1)
+
+            y_HS_pred = np.vstack((pred_hs_r, pred_hs_l)) if len(pred_hs_r) or len(pred_hs_l) else np.empty((0, 2))
+            y_FO_pred = np.vstack((pred_fo_r, pred_fo_l)) if len(pred_fo_r) or len(pred_fo_l) else np.empty((0, 2))
             
-            y_HS_pred = np.zeros((len(all_HS_times), 2))
-            y_FO_pred = np.zeros((len(all_FO_times), 2))
-            y_HS_pred[:,0] = all_HS_times
-            y_FO_pred[:,0] = all_FO_times
+            # Sort chronologically by time (column 0)
+            if len(y_HS_pred): y_HS_pred = y_HS_pred[y_HS_pred[:, 0].argsort()]
+            if len(y_FO_pred): y_FO_pred = y_FO_pred[y_FO_pred[:, 0].argsort()]
+
+            # --- TAG AND COMBINE GROUND TRUTH ---
+            true_hs_r_tagged = tag_foot(true_hs_r, 0)
+            true_hs_l_tagged = tag_foot(true_hs_l, 1)
+            true_fo_r_tagged = tag_foot(true_fo_r, 0)
+            true_fo_l_tagged = tag_foot(true_fo_l, 1)
+
+            y_HS_true = np.vstack((true_hs_r_tagged, true_hs_l_tagged)) if len(true_hs_r_tagged) or len(true_hs_l_tagged) else np.empty((0, 2))
+            y_FO_true = np.vstack((true_fo_r_tagged, true_fo_l_tagged)) if len(true_fo_r_tagged) or len(true_fo_l_tagged) else np.empty((0, 2))
+
+            if len(y_HS_true): y_HS_true = y_HS_true[y_HS_true[:, 0].argsort()]
+            if len(y_FO_true): y_FO_true = y_FO_true[y_FO_true[:, 0].argsort()]
 
             results = {
                 'y_HS': y_HS_true,         # true
