@@ -20,10 +20,10 @@ TARGET_COLS = ["time"] + RIGHT_FOOT_COLS + LEFT_FOOT_COLS
 SAMPLING_FREQUENCY = 60
 DETECTORS = ['shoe', 'ared', 'amvd', 'mbgtd']
 SPECS = {  # G values are sensor/walking surface dependent more at https://github.com/utiasSTARS/pyshoe/tree/master
-    'shoe': {"G":2.45e8},
+    'shoe': {"G":1.1e9},
     'ared': {"G":2.0},
     'amvd': {"G":7},
-    'mbgtd': {"G":10},
+    'mbgtd': {"G":43},
 }
 
 def clean_gait_events(hs_times: np.ndarray, fo_times: np.ndarray, sampling_freq: float) -> tuple[np.ndarray, np.ndarray]:
@@ -106,7 +106,7 @@ def pyshoe_process_single_file(
     # Look at the disk first to see which detectors actually need to be run
     detectors_to_run = []
     for detector_name in DETECTORS:
-        out_file = data_path / "toolbox1" / detector_name / f'{id}_{course}_{clip_id}.mat'
+        out_file = data_path / "stairs" / detector_name / f'{id}_{course}_{clip_id}.mat'
         if not out_file.exists():
             detectors_to_run.append((detector_name, out_file))
             
