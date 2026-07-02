@@ -163,6 +163,11 @@ class GaitAnalysisPipeline:
                         precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
                         recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
                         
+                        if precision + recall > 0:
+                            f1 = 2 * (precision * recall) / (precision + recall)
+                        else:
+                            f1 = 0.0
+
                         # F-beta score where beta = 2 (Rec is twice as important as Prec)
                         beta = 2.0
                         beta_sq = beta ** 2
@@ -183,7 +188,8 @@ class GaitAnalysisPipeline:
                             'event_type': event_type,
                             'precision': precision,
                             'recall': recall,
-                            'f2_score': f2, # Updated from F1
+                            'f1_score': f1, 
+                            'f2_score': f2, 
                             'mean_absolute_error_ms': mae,
                             'std_error_ms': std_err
                         })
@@ -204,6 +210,8 @@ class GaitAnalysisPipeline:
         print("\n### Detector Performance Summary")
         
         summary = self.df_all_segments.groupby(['detector', 'event_type']).agg(
+            f1_mean=('f1_score', 'mean'),
+            f1_std=('f1_score', 'std'),          
             f2_mean=('f2_score', 'mean'),
             f2_std=('f2_score', 'std'),
             precision_mean=('precision', 'mean'),
