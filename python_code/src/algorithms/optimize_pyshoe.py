@@ -689,7 +689,7 @@ def optimize_detector_G(
     #     fine_half_width = 3.0  # Slightly wider fine search given the large range
     #     fine_points = 9
     else:
-        coarse_x = np.linspace(0.1, 200.0, 20) 
+        coarse_x = np.linspace(45.0, 57.0, 15) 
         to_G = lambda x: x
         from_x = lambda g: g
         fine_half_width = 2.0
