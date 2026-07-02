@@ -20,7 +20,7 @@ TARGET_COLS = ["time"] + RIGHT_FOOT_COLS + LEFT_FOOT_COLS
 SAMPLING_FREQUENCY = 60
 DETECTORS = ['shoe', 'ared', 'amvd', 'mbgtd']
 SPECS = {  # G values are sensor/walking surface dependent more at https://github.com/utiasSTARS/pyshoe/tree/master
-    'shoe': {"G":1.1e9},
+    'shoe': {"G":2.45e8},
     'ared': {"G":2.0},
     'amvd': {"G":7},
     'mbgtd': {"G":43},
@@ -63,7 +63,8 @@ def pyshoe_process_single_file(
     true_fo_r: pd.DataFrame | np.ndarray, 
     true_hs_l: pd.DataFrame | np.ndarray, 
     true_fo_l: pd.DataFrame | np.ndarray, 
-    data_path: Path
+    data_path: Path,
+    fs: float
 ) -> str:
     """
     Processes a single trial dataset across all four zero-velocity update (ZUPT) 
@@ -103,28 +104,25 @@ def pyshoe_process_single_file(
         A status summary string confirming completion of missing detectors, a skip message 
         if all four detectors are already found cached on disk, or an error description.
     """
-    # Look at the disk first to see which detectors actually need to be run
     detectors_to_run = []
     for detector_name in DETECTORS:
-        out_file = data_path / "stairs" / detector_name / f'{id}_{course}_{clip_id}.mat'
+        out_file = data_path / detector_name / f'{id}_{course}_{clip_id}.mat'
         if not out_file.exists():
             detectors_to_run.append((detector_name, out_file))
             
-    # If the list is empty, every single detector has already been processed. 
     if not detectors_to_run:
         return f"Skipped {id}_{course} (Already completely processed)"
 
     try:
         imu_left = segment[LEFT_FOOT_COLS].to_numpy() 
-        imu_right = segment[RIGHT_FOOT_COLS].to_numpy() # PyShoe takes in an N x 6 numpy array
+        imu_right = segment[RIGHT_FOOT_COLS].to_numpy() 
         time = segment["time"].to_numpy().squeeze()
 
-        # loop detectors
         for detector_name, out_file in detectors_to_run:
             G_val = SPECS[detector_name]['G']
 
-            # Left Foot
-            ins_left = INS(imu_left, sigma_a=0.00098, sigma_w=8.7266463e-5, T=1.0/SAMPLING_FREQUENCY) 
+            # Left Foot (Using dynamic fs)
+            ins_left = INS(imu_left, sigma_a=0.00098, sigma_w=8.7266463e-5, T=1.0/fs) 
             ins_left.baseline(W=5, G=G_val, detector=detector_name)
             steps_left = ins_left.zv
             
@@ -132,15 +130,14 @@ def pyshoe_process_single_file(
             diff_left = np.diff(padded_left)
             HS_indices_left = np.where(diff_left == 1)[0]
             FO_indices_left = np.where(diff_left == -1)[0]
-            # Remove artificial HS if foot started in stance
             if steps_left[0] and len(HS_indices_left) > 0:
                 HS_indices_left = HS_indices_left[1:]
 
             HS_times_left = time[HS_indices_left]
             FO_times_left = time[FO_indices_left]
 
-            # Right Foot
-            ins_right = INS(imu_right, sigma_a=0.00098, sigma_w=8.7266463e-5, T=1.0/60) 
+            # Right Foot (Using dynamic fs)
+            ins_right = INS(imu_right, sigma_a=0.00098, sigma_w=8.7266463e-5, T=1.0/fs) 
             ins_right.baseline(W=5, G=G_val, detector=detector_name)
             steps_right = ins_right.zv 
             
@@ -148,17 +145,16 @@ def pyshoe_process_single_file(
             diff_right = np.diff(padded_right)
             HS_indices_right = np.where(diff_right == 1)[0]
             FO_indices_right = np.where(diff_right == -1)[0]
-            if steps_right[0]:
+            if steps_right[0] and len(HS_indices_right) > 0:
                 HS_indices_right = HS_indices_right[1:]
 
             HS_times_right = time[HS_indices_right]
             FO_times_right = time[FO_indices_right]
 
-            # Clean the raw events for both feet
-            HS_times_left, FO_times_left = clean_gait_events(HS_times_left, FO_times_left, SAMPLING_FREQUENCY)
-            HS_times_right, FO_times_right = clean_gait_events(HS_times_right, FO_times_right, SAMPLING_FREQUENCY)
+            # Clean the raw events for both feet using dynamic fs
+            HS_times_left, FO_times_left = clean_gait_events(HS_times_left, FO_times_left, fs)
+            HS_times_right, FO_times_right = clean_gait_events(HS_times_right, FO_times_right, fs)
 
-            # Combine
             def tag_foot(times, label):
                 if len(times) == 0: return np.empty((0, 2))
                 return np.column_stack((times, np.full(len(times), label)))
@@ -171,11 +167,9 @@ def pyshoe_process_single_file(
             y_HS_pred = np.vstack((pred_hs_r, pred_hs_l)) if len(pred_hs_r) or len(pred_hs_l) else np.empty((0, 2))
             y_FO_pred = np.vstack((pred_fo_r, pred_fo_l)) if len(pred_fo_r) or len(pred_fo_l) else np.empty((0, 2))
             
-            # Sort chronologically by time (column 0)
             if len(y_HS_pred): y_HS_pred = y_HS_pred[y_HS_pred[:, 0].argsort()]
             if len(y_FO_pred): y_FO_pred = y_FO_pred[y_FO_pred[:, 0].argsort()]
 
-            # --- TAG AND COMBINE GROUND TRUTH ---
             true_hs_r_tagged = tag_foot(true_hs_r, 0)
             true_hs_l_tagged = tag_foot(true_hs_l, 1)
             true_fo_r_tagged = tag_foot(true_fo_r, 0)
@@ -188,18 +182,16 @@ def pyshoe_process_single_file(
             if len(y_FO_true): y_FO_true = y_FO_true[y_FO_true[:, 0].argsort()]
 
             results = {
-                'y_HS': y_HS_true,         # true
+                'y_HS': y_HS_true,         
                 'y_FO': y_FO_true,
-                'y_hat_HS': y_HS_pred,     # pred
+                'y_hat_HS': y_HS_pred,     
                 'y_hat_FO': y_FO_pred
             }
 
-            # Save specific detector output
             out_file.parent.mkdir(parents=True, exist_ok=True)
             savemat(out_file, {'results': results})
 
         return f"{id}_{course}_{clip_id}.mat Success"
     
     except Exception as e:
-        return f"Error: {str(e)}"
-
+        return f"Error on {id}_{course}_{clip_id}: {str(e)}"
