@@ -304,8 +304,9 @@ class GaitAnalysisPipeline:
 if __name__ == "__main__":
     STAIRS_DIRECTORY = Path(__file__).resolve().parent.parent / "data" / "stairs"
     WALK_DIRECTORY = Path(__file__).resolve().parent.parent / "data" / "walk"
+    AMBULATION_STAIRS = Path(__file__).resolve().parent.parent / "data" / "ambulation_out"
     
-    pipeline = GaitAnalysisPipeline(data_dir=STAIRS_DIRECTORY, tolerance_ms=150.0)
+    pipeline = GaitAnalysisPipeline(data_dir=AMBULATION_STAIRS, tolerance_ms=300.0)
     pipeline.parse_and_match()
     pipeline.generate_summary_table()
     pipeline.visualize()
