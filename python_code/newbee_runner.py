@@ -4,10 +4,10 @@ from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor
 
 # Import your preprocessing and toolbox functions
-from python_code.src.preprocessing.extractGoldenStandard import extract_golden_standard
+from python_code.src.preprocessing.extract_golden_standard import extract_golden_standard
 from python_code.Toolboxes.KielMAT.kielmat_export import kielmat_process_single_file
 from python_code.Toolboxes.PyShoe.pyshoe_export import pyshoe_process_single_file
-from python_code.src.preprocessing.extractStairs import get_stair_segments
+from python_code.src.preprocessing.extract_stairs import get_stair_segments
 
 # Constants
 SAMPLING_FREQUENCY = 60

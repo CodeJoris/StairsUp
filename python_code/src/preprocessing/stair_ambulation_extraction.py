@@ -7,6 +7,8 @@ It extracts the pre-segmented IMU arrays and corresponding ground truth events
 from the `pressure_insole_event_list_` attribute. Ground truth events (IC and TC) 
 are trimmed to form complete stance phases and formatted as Nx2 arrays 
 [index, foot_tag], sorted chronologically.
+
+Used in: python_code/osf_runner
 """
 
 import numpy as np
