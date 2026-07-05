@@ -6,14 +6,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from python_code.src.preprocessing.extractGoldenStandard import (
+from python_code.src.preprocessing.extract_golden_standard import (
     extract_golden_standard,
     validate_golden_standard_input,
     pair_events,
     align_fo_to_hs,
     remove_t0,
 )
-from python_code.src.preprocessing.extractStairs import (
+from python_code.src.preprocessing.extract_stairs import (
     get_stair_segments,
     parse_course_subject_from_label_path,
 )
