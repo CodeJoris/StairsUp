@@ -13,21 +13,27 @@ class Localizer():
         self.config = config
         self.imudata = imudata
         self.count=1
-    def init(self):
+    def init(self, q_init=None):
         imudata = self.imudata 
         x = np.zeros((imudata.shape[0],9)) #initialize state to be at 0
         q = np.zeros((imudata.shape[0],4)) #Initialize quaternion 
-        avg_x = np.mean(imudata[0:20,0])
-        avg_y = np.mean(imudata[0:20,1])
-        avg_z = np.mean(imudata[0:20,2]) #gets avg accelerometer values for finding roll/pitch
-        
-        heading = 0
-        roll = np.arctan2(-avg_y,-avg_z)
-        pitch = np.arctan2(avg_x,np.sqrt(avg_y*avg_y + avg_z*avg_z))
-           
-        attitude = np.array([roll, pitch, heading])
-        x[0, 6:9] = attitude
-        q[0, :] = euler2quat(roll, pitch, heading, 'sxyz')
+
+        if q_init is not None:
+            # Use the explicitly passed quaternion from your standing baseline
+            q[0, :] = q_init
+            attitude = quat2euler(q_init, 'sxyz')
+            x[0, 6:9] = attitude
+        else:
+            # Fallback to original PyShoe logic (only safe for stationary starts)
+            avg_x = np.mean(imudata[0:20,0])
+            avg_y = np.mean(imudata[0:20,1])
+            avg_z = np.mean(imudata[0:20,2]) 
+            heading = 0
+            roll = np.arctan2(-avg_y,-avg_z)
+            pitch = np.arctan2(avg_x,np.sqrt(avg_y*avg_y + avg_z*avg_z))
+            attitude = np.array([roll, pitch, heading])
+            x[0, 6:9] = attitude
+            q[0, :] = euler2quat(roll, pitch, heading, 'sxyz')
 
         P_hat = np.zeros((imudata.shape[0],9,9)) #initial covariance matrix P
         P_hat[0,0:3,0:3] = np.power(1e-5,2)*np.identity(3) #position (x,y,z) variance
@@ -51,7 +57,8 @@ class Localizer():
         
         Rot_out = quat2mat(q_out)   #get rotation matrix from quat
         acc_n = Rot_out.dot(imu[0:3])       #transform acc to navigation frame,  
-        acc_n = acc_n + np.array([0,0,self.config["g"]])   #removing gravity (by adding)
+        if self.config.get("has_gravity", True):
+            acc_n = acc_n + np.array([0,0,self.config["g"]])   #removing gravity (by adding)
         
         x_out[3:6] += dt*acc_n #velocity update
         x_out[0:3] += dt*x_out[3:6] +0.5*np.power(dt,2)*acc_n #position update
@@ -95,43 +102,65 @@ class Localizer():
 
     def SHOE(self, W=5):
         imudata = self.imudata
-        T = np.zeros(int(np.floor(imudata.shape[0]/W)+1))
-        zupt = np.zeros(imudata.shape[0])
-        a = np.zeros((1,3))
-        w = np.zeros((1,3))
-        inv_a = (1/self.config["var_a"])
-        inv_w = (1/self.config["var_w"])
-        acc = imudata[:,0:3]
-        gyro = imudata[:,3:6]
-    
-        i=0
-        for k in range(0,imudata.shape[0]-W+1,W): #filter through all imu readings
-            smean_a = np.mean(acc[k:k+W,:],axis=0)
-            for s in range(k,k+W):
-                a.put([0,1,2],acc[s,:])
-                w.put([0,1,2],gyro[s,:])
-                T[i] += inv_a*( (a - self.config["g"]*smean_a/LA.norm(smean_a)).dot(( a - self.config["g"]*smean_a/LA.norm(smean_a)).T)) #acc terms
-                T[i] += inv_w*( (w).dot(w.T) )
-            zupt[k:k+W].fill(T[i])
-            i+=1
-        zupt = zupt/W
+        N = imudata.shape[0]
+        acc = imudata[:, 0:3]
+        gyro = imudata[:, 3:6]
+        
+        inv_a = 1 / self.config["var_a"]
+        inv_w = 1 / self.config["var_w"]
+        
+        # 1. Vectorized Gyroscope Term
+        # Calculate squared magnitudes, then apply a rolling sum
+        gyro_sq_mag = np.sum(gyro**2, axis=1)
+        window = np.ones(W)
+        gyro_term = np.convolve(gyro_sq_mag, window, mode='valid') * inv_w
+        
+        # 2. Vectorized Acceleration Term
+        if self.config.get("has_gravity", True):
+            # Rolling sum of squared magnitudes
+            acc_sq_mag = np.sum(acc**2, axis=1)
+            sum_acc_sq = np.convolve(acc_sq_mag, window, mode='valid')
+            
+            # Rolling sum of the acceleration vectors (for local gravity estimation)
+            sum_acc_x = np.convolve(acc[:, 0], window, mode='valid')
+            sum_acc_y = np.convolve(acc[:, 1], window, mode='valid')
+            sum_acc_z = np.convolve(acc[:, 2], window, mode='valid')
+            
+            # Magnitude of the rolling sum vector
+            sum_acc_mag = np.sqrt(sum_acc_x**2 + sum_acc_y**2 + sum_acc_z**2)
+            
+            # Apply the expanded algebraic formula
+            g = self.config["g"]
+            acc_term = (sum_acc_sq - 2 * g * sum_acc_mag + W * (g**2)) * inv_a
+        else:
+            # freeAcc data: Just take the rolling sum of the squared magnitudes
+            acc_sq_mag = np.sum(acc**2, axis=1)
+            acc_term = np.convolve(acc_sq_mag, window, mode='valid') * inv_a
+            
+        # 3. Combine and normalize by window size W
+        T = (acc_term + gyro_term) / W
+        
+        # 4. Pad the tail to maintain original array length
+        zupt = np.zeros(N)
+        zupt[:len(T)] = T
+        zupt[len(T):] = T[-1] 
+        
         return zupt
         
-    def ARED(self, W=5): #angular rate energy detector
+    def ARED(self, W=5):
         imudata = self.imudata
-        T = np.zeros(int(np.floor(imudata.shape[0]/W)+1))
-        zupt = np.zeros(imudata.shape[0])
-        w = np.zeros((1,3))
-        gyro = imudata[:,3:6]
-    
-        i=0
-        for k in range(0,imudata.shape[0]-W+1,W): #filter through all imu readings
-            for s in range(k,k+W):
-                w.put([0,1,2],gyro[s,:])
-                T[i] += w.dot(w.T)
-            zupt[k:k+W].fill(T[i])
-            i+=1
-        zupt = zupt/W
+        N = imudata.shape[0]
+        gyro = imudata[:, 3:6]
+        
+        # Rolling sum of squared gyroscope magnitudes
+        gyro_sq_mag = np.sum(gyro**2, axis=1)
+        T = np.convolve(gyro_sq_mag, np.ones(W), mode='valid') / W
+        
+        # Pad the tail to maintain original array length
+        zupt = np.zeros(N)
+        zupt[:len(T)] = T
+        zupt[len(T):] = T[-1]
+        
         return zupt
         
     def AMVD(self, W=5): #angular rate energy detector
