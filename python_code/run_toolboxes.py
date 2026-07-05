@@ -10,7 +10,10 @@ from python_code.Toolboxes.PyShoe.pyshoe_export import pyshoe_process_single_fil
 from python_code.src.preprocessing.extractStairs import get_stair_segments
 
 # Constants
+SAMPLING_FREQUENCY = 60
 DATA_PATH = Path(__file__).resolve().parent.parent / "data"
+TARGET_MODE = "stairs_up" # CHANGE THIS: to see other surfaces
+OUTPUT_PATH = DATA_PATH / TARGET_MODE
 COLS = ["time", "insoles_RightFoot_is_step", "insoles_LeftFoot_is_step", "insoles_RightFoot_is_lifted", "insoles_LeftFoot_is_lifted"]
 
 def get_ytrue_for_stairs(course: str, id: str) -> list:
@@ -46,7 +49,7 @@ def get_ytrue_for_stairs(course: str, id: str) -> list:
         file_path = DATA_PATH / "data_set" / course / id / "labels.csv"
 
         # 1. Get our stairs segments (start and end times)
-        stair_blocks = get_stair_segments(str(file_path), target_mode="stairs_up")
+        stair_blocks = get_stair_segments(str(file_path), target_mode=TARGET_MODE)
         if stair_blocks.empty:
             return []  # No stairs up in this entire trial
 
@@ -149,13 +152,14 @@ def process_file_all_toolboxes(file_path: Path) -> str:
         # res_kielmat = kielmat_process_single_file(sensor_clip, course, id, clip['segment_id'], clip['y_HS'], clip['y_FO'], DATA_PATH)
         res_kielmat = "Not on"
         res_pyshoe = pyshoe_process_single_file(
-            sensor_clip, course, id, clip['segment_id'], 
+            sensor_clip, False, course, id, clip['segment_id'], 
             clip['y_HS_r'], clip['y_FO_r'], 
             clip['y_HS_l'], clip['y_FO_l'], 
-            DATA_PATH
+            OUTPUT_PATH, SAMPLING_FREQUENCY
         )
         
-        results_summary.append(f"Clip {clip['segment_id']}: KielMAT [{res_kielmat}] | PyShoe [{res_pyshoe}]")
+        # results_summary.append(f"Clip {clip['segment_id']}: KielMAT [{res_kielmat}] | PyShoe [{res_pyshoe}]")
+        results_summary.append(f"Clip {clip['segment_id']}: PyShoe [{res_pyshoe}]")
         
     return f"{id}_{course} => " + " | ".join(results_summary)
 
