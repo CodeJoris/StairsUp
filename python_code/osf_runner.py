@@ -1,4 +1,3 @@
-#%% Imports
 import pandas as pd
 import numpy as np
 import re
@@ -11,7 +10,7 @@ from python_code.src.preprocessing.stair_ambulation_extraction import extract_as
 from python_code.Toolboxes.PyShoe.pyshoe_export import pyshoe_process_single_file
 
 DATA_PATH = Path(__file__).resolve().parent.parent / "data"
-TOOLBOX_DIR = DATA_PATH / "ambulation_out"
+OUTPUT_DIR = DATA_PATH / "ambulation_out"
 
 def process_single_test(test_data, toolbox_dir):
     """Worker function to be executed by ProcessPoolExecutor."""
@@ -22,7 +21,7 @@ def process_single_test(test_data, toolbox_dir):
     id_match = re.search(r'subject_(\d+)', test_name)
     subject_id = f"subj{id_match.group(1)}" if id_match else "subjXX"
     course = "OSF" 
-    clip_id = "clip_" + re.sub(r'[^a-zA-Z0-9]', '', test_name.split('part')[-1])
+    clip_id = re.sub(r'[^a-zA-Z0-9]', '', test_name.split('part')[-1])
 
     # Early Exit Check
     already_processed = True
@@ -55,7 +54,7 @@ def process_single_test(test_data, toolbox_dir):
     true_fo_l = (tc[tc[:, 1] == 1][:, 0] * (1000.0 / fs)) if len(tc) > 0 else np.array([])
 
     return pyshoe_process_single_file(
-        segment_df, course, subject_id, clip_id, true_hs_r, true_fo_r, true_hs_l, true_fo_l, toolbox_dir, fs
+        segment_df, True, course, subject_id, clip_id, true_hs_r, true_fo_r, true_hs_l, true_fo_l, toolbox_dir, fs
     )
 
 if __name__ == "__main__":
@@ -65,7 +64,7 @@ if __name__ == "__main__":
         ascending_tests = extract_ascending_stairs_data(str(NILSPOD_DATA_PATH))
         
         # Use partial to pass the toolbox_dir argument
-        worker_func = partial(process_single_test, toolbox_dir=TOOLBOX_DIR)
+        worker_func = partial(process_single_test, toolbox_dir=OUTPUT_DIR)
         
         # Execute in parallel
         print("\nStarting Parallel Processing...")
