@@ -12,7 +12,7 @@ from python_code.src.preprocessing.extract_stairs import get_stair_segments
 # Constants
 SAMPLING_FREQUENCY = 60
 DATA_PATH = Path(__file__).resolve().parent.parent / "data"
-TARGET_MODE = "stairs_up" # CHANGE THIS: to see other surfaces
+TARGET_MODE = "stairs_up" #"stairs_up" # CHANGE THIS: to see other surfaces
 OUTPUT_PATH = DATA_PATH / TARGET_MODE
 COLS = ["time", "insoles_RightFoot_is_step", "insoles_LeftFoot_is_step", "insoles_RightFoot_is_lifted", "insoles_LeftFoot_is_lifted"]
 
@@ -149,8 +149,12 @@ def process_file_all_toolboxes(file_path: Path) -> str:
         # or pass the pre-sliced `file_path` clips you exported earlier!
         sensor_clip = raw_sensor_df[(raw_sensor_df.time >= clip['start_time']) & 
                                     (raw_sensor_df.time <= clip['end_time'])]
-        # res_kielmat = kielmat_process_single_file(sensor_clip, course, id, clip['segment_id'], clip['y_HS'], clip['y_FO'], DATA_PATH)
-        res_kielmat = "Not on"
+        res_kielmat = kielmat_process_single_file(
+            sensor_clip, course, id, clip['segment_id'], 
+            clip['y_HS_r'], clip['y_FO_r'], 
+            clip['y_HS_l'], clip['y_FO_l'], 
+            OUTPUT_PATH)
+        # res_kielmat = "Not on"
         res_pyshoe = pyshoe_process_single_file(
             sensor_clip, False, course, id, clip['segment_id'], 
             clip['y_HS_r'], clip['y_FO_r'], 
@@ -159,7 +163,7 @@ def process_file_all_toolboxes(file_path: Path) -> str:
         )
         
         # results_summary.append(f"Clip {clip['segment_id']}: KielMAT [{res_kielmat}] | PyShoe [{res_pyshoe}]")
-        results_summary.append(f"Clip {clip['segment_id']}: PyShoe [{res_pyshoe}]")
+        results_summary.append(f"Clip {clip['segment_id']}: KielMAT [{res_kielmat}] | PyShoe [{res_pyshoe}]")
         
     return f"{id}_{course} => " + " | ".join(results_summary)
 
