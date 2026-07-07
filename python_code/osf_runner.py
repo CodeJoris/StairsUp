@@ -25,7 +25,7 @@ def process_single_test(test_data, toolbox_dir):
 
     # Early Exit Check
     already_processed = True
-    for detector in ['shoe', 'ared', 'amvd', 'mbgtd']:
+    for detector in ['shoe']:
         if not (toolbox_dir / detector / f"{subject_id}_{course}_{clip_id}.mat").exists():
             already_processed = False
             break
