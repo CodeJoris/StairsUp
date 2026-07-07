@@ -33,8 +33,8 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from python_code.src.preprocessing.extractStairs import get_stair_segments
-from python_code.src.preprocessing.extractGoldenStandard import (
+from python_code.src.preprocessing.extract_stairs import get_stair_segments
+from python_code.src.preprocessing.extract_golden_standard import (
     extract_golden_standard,
     validate_golden_standard_input,
 )
