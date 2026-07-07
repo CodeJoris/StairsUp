@@ -18,53 +18,70 @@ LEFT_FOOT_COLS = ['acceleration_LeftFoot_x', 'acceleration_LeftFoot_y', 'acceler
 TARGET_COLS = ["time"] + RIGHT_FOOT_COLS + LEFT_FOOT_COLS
 
 DETECTORS = ['shoe', 'ared', 'amvd', 'mbgtd']
+DETECTORS = ['shoe']
 SPECS = {  # G values are sensor/walking surface dependent more at https://github.com/utiasSTARS/pyshoe/tree/master
-    'shoe': {"G":15000},
+    'shoe': {"G":1583}, # 7651 for FO newbee
     'ared': {"G":2.0},
     'amvd': {"G":7},
     'mbgtd': {"G":43},
 }
 
-def clean_gait_events(hs_times: np.ndarray, fo_times: np.ndarray, sampling_freq: float) -> tuple[np.ndarray, np.ndarray]:
-    """Processes a single gait segment to extract step timings using PyShoe.
-
-        Executes the zero-velocity detection pipeline, calculates signal noise floor
-        dynamically, detects gait events, and exports the results to a .mat file 
-        compatible with the GaitAnalysisPipeline.
-
-        Args:
-            segment (pd.DataFrame): DataFrame containing columns for both feet.
-            course (str): Identifier for the experimental course.
-            id (str): Subject identifier.
-            clip_id (int): Segment clip index.
-            true_hs_r/l (np.ndarray): Ground truth HS timestamps for right/left foot.
-            true_fo_r/l (np.ndarray): Ground truth FO timestamps for right/left foot.
-            data_path (Path): Directory path to save the resulting .mat file.
-            fs (float): Sampling frequency of the segment.
-
-        Returns:
-            str: A status message indicating success or failure of the processing.
+def clean_raw_zupt_mask(raw_mask: np.ndarray, time: np.ndarray, W: int, min_spacing_ms: float = 600.0, to_fo_delay_ms: float = 150.0):
     """
-    # 1. Drop lone initial Foot Off (mid-swing start)
-    if len(fo_times) > 0 and len(hs_times) > 0:
-        if fo_times[0] < hs_times[0]:
-            fo_times = fo_times[1:]
-            
-    # 2. Drop lone trailing Heel Strike (stance-phase end)
-    if len(hs_times) > 0 and len(fo_times) > 0:
-        if hs_times[-1] > fo_times[-1]:
-            hs_times = hs_times[:-1]
-
-    # 3. Enforce Minimum Stance Time
-    MIN_STANCE_MS = 300
+    Centralized pipeline filter. Extracts edges, applies debouncing, 
+    and reconstructs a clean boolean mask and event arrays.
+    """
+    # 1. Extract Edges (with padding to prevent high-threshold orphans)
+    padded = np.concatenate(([False], raw_mask, [False])).astype(int)
+    diff = np.diff(padded)
     
-    if len(hs_times) == len(fo_times) and len(hs_times) > 0:
-        stance_durations = fo_times - hs_times
-        valid_mask = stance_durations >= MIN_STANCE_MS
-        hs_times = hs_times[valid_mask]
-        fo_times = fo_times[valid_mask]
+    hs_idx = np.where(diff == 1)[0]
+    fo_idx = np.where(diff == -1)[0] + (W - 1)
+    fo_idx = np.clip(fo_idx, 0, len(time) - 1)
+    
+    if raw_mask[0] and len(hs_idx) > 0: 
+        hs_idx = hs_idx[1:]
         
-    return hs_times, fo_times
+    hs_times = time[hs_idx]
+    fo_times = time[fo_idx]
+    
+    # 2. Apply Debounce independently to filter impact transients
+    hs_times = debounce_events(hs_times, min_spacing_ms)
+    fo_times = debounce_events(fo_times, min_spacing_ms)
+    
+    # 3. Pair them back up (A valid stance is an HS to the next available FO)
+    valid_hs, valid_fo = [], []
+    cleaned_mask = np.zeros(len(raw_mask), dtype=bool)
+    
+    for hs in hs_times:
+        future_fos = fo_times[fo_times > hs]
+        if len(future_fos) > 0:
+            fo = future_fos[0] + to_fo_delay_ms
+            valid_hs.append(hs)
+            valid_fo.append(fo)
+            cleaned_mask[(time >= hs) & (time <= fo)] = True
+            
+    return cleaned_mask, np.array(valid_hs), np.array(valid_fo)
+
+def debounce_events(event_times: np.ndarray, min_spacing_ms: float = 800.0) -> np.ndarray:
+    """
+    Filters out false-positive events that occur too closely together.
+    Once a valid event is registered, all subsequent events within the 
+    min_spacing_ms window are ignored.
+    """
+    if len(event_times) < 2:
+        return event_times
+
+    valid_indices = [0]
+    last_valid_time = event_times[0]
+
+    for i in range(1, len(event_times)):
+        # If the time since the last accepted event is greater than the threshold
+        if (event_times[i] - last_valid_time) >= min_spacing_ms:
+            valid_indices.append(i)
+            last_valid_time = event_times[i]  # Reset the timer
+
+    return event_times[valid_indices]
 
 def estimate_noise_from_midstance(imu_data: np.ndarray, fs: float, window_duration_sec: float = 0.1) -> tuple[float, float]:
     """
@@ -170,14 +187,18 @@ def compute_shoe_timing(imu_data: np.ndarray, sigma_a: float, sigma_w: float, W:
         
     # 3. Apply the threshold
     T = (acc_term + gyro_term) / W
-    # print(f"DEBUG: T min: {np.min(T)}, T max: {np.max(T)}") # Add this
 
     # 4. Pad the tail to match the original array length
     zv = np.zeros(N, dtype=bool)
     zv[:len(T)] = T < G
     zv[len(T):] = T[-1] < G
     
-    return zv
+    # Pad T as well so it matches the length of time array
+    T_padded = np.zeros(N)
+    T_padded[:len(T)] = T
+    T_padded[len(T):] = T[-1]
+    
+    return zv, T_padded
 
 def pyshoe_process_single_file(
     segment: pd.DataFrame, 
@@ -257,9 +278,8 @@ def pyshoe_process_single_file(
 
             # 2. Bypass the EKF Trajectory Math
             if detector_name == 'shoe':
-                # Use your newly added ultra-fast vectorized function
-                steps_left = compute_shoe_timing(imu_left, sigma_a_l, sigma_w_l, W, G_val, has_gravity)
-                steps_right = compute_shoe_timing(imu_right, sigma_a_r, sigma_w_r, W, G_val, has_gravity)
+                steps_left, T_l = compute_shoe_timing(imu_left, sigma_a_l, sigma_w_l, W, G_val, has_gravity)
+                steps_right, T_r = compute_shoe_timing(imu_right, sigma_a_r, sigma_w_r, W, G_val, has_gravity)
             else:
                 # For ARED, AMVD, MBGTD: initialize INS but ONLY compute the detector array, 
                 # skipping the heavy .baseline() Kalman Filter loop completely.
@@ -269,43 +289,10 @@ def pyshoe_process_single_file(
                 ins_r = INS(imu_right, False, sigma_a=sigma_a_r, sigma_w=sigma_w_r, T=1.0/fs)
                 steps_right = ins_r.Localizer.compute_zv_lrt(W=W, G=G_val, detector=detector_name)
 
-            # --- Extract Timings for Left Foot ---
-            padded_left = np.insert(steps_left, 0, False).astype(int)
-            diff_left = np.diff(padded_left)
-            
-            # Initial Contact (IC) is when the stationary window begins
-            HS_indices_left = np.where(diff_left == 1)[0]
-            
-            # 3. Correct Phase Shift: Terminal Contact (TC) is when the window ends PLUS the window length
-            FO_indices_left = np.where(diff_left == -1)[0] + (W - 1)
-            FO_indices_left = FO_indices_left[FO_indices_left < len(time)] # Prevent out-of-bounds
+            # Clean and extract events using the centralized function
+            _, HS_times_left, FO_times_left = clean_raw_zupt_mask(steps_left, time, W, min_spacing_ms=600, to_fo_delay_ms = 150)
+            _, HS_times_right, FO_times_right = clean_raw_zupt_mask(steps_right, time, W, min_spacing_ms=600, to_fo_delay_ms = 150)
 
-            if steps_left[0] and len(HS_indices_left) > 0:
-                HS_indices_left = HS_indices_left[1:]
-
-            HS_times_left = time[HS_indices_left]
-            FO_times_left = time[FO_indices_left]
-
-            # --- Extract Timings for Right Foot ---
-            padded_right = np.insert(steps_right, 0, False).astype(int)
-            diff_right = np.diff(padded_right)
-            
-            # Initial Contact (IC)
-            HS_indices_right = np.where(diff_right == 1)[0]
-            
-            # 3. Correct Phase Shift: Terminal Contact (TC)
-            FO_indices_right = np.where(diff_right == -1)[0] + (W - 1)
-            FO_indices_right = FO_indices_right[FO_indices_right < len(time)] # Prevent out-of-bounds
-
-            if steps_right[0] and len(HS_indices_right) > 0:
-                HS_indices_right = HS_indices_right[1:]
-
-            HS_times_right = time[HS_indices_right]
-            FO_times_right = time[FO_indices_right]
-
-            # Clean the raw events for both feet using dynamic fs
-            HS_times_left, FO_times_left = clean_gait_events(HS_times_left, FO_times_left, fs)
-            HS_times_right, FO_times_right = clean_gait_events(HS_times_right, FO_times_right, fs)
 
             def tag_foot(times, label):
                 if len(times) == 0: return np.empty((0, 2))
@@ -343,7 +330,9 @@ def pyshoe_process_single_file(
                 'y_HS': y_HS_true,
                 'y_FO': y_FO_true,
                 'y_hat_HS': y_HS_pred,     
-                'y_hat_FO': y_FO_pred
+                'y_hat_FO': y_FO_pred,
+                'T_l': T_l if detector_name == 'shoe' else [], # Save T for sweeping
+                'T_r': T_r if detector_name == 'shoe' else []
             }       
 
             out_file.parent.mkdir(parents=True, exist_ok=True)
