@@ -16,9 +16,11 @@ def kielmat_process_single_file(
     course: str, 
     id: str, 
     clip_id: int,  # Added to separate staircase events
-    y_HS_true: pd.DataFrame | np.ndarray, 
-    y_FO_true: pd.DataFrame | np.ndarray, 
-    data_path: Path
+    true_hs_r: pd.DataFrame | np.ndarray, 
+    true_fo_r: pd.DataFrame | np.ndarray, 
+    true_hs_l: pd.DataFrame | np.ndarray, 
+    true_fo_l: pd.DataFrame | np.ndarray, 
+    output_path: Path
 ) -> str:
     """
     Processes a single trial dataset using KielMAT's signal decomposition algorithm 
@@ -49,9 +51,9 @@ def kielmat_process_single_file(
     y_FO_true : pd.DataFrame or pd.Series or np.ndarray
         The ground truth foot off annotations for this specific segment window.
         
-    data_path : pathlib.Path
-        The base Path object pointing to the global data directory where outputs 
-        will be structured under 'toolbox1/KielMAT/'.
+    ouput_path : pathlib.Path
+        The base Path object pointing to the output directory where outputs 
+        will be structured under 'output_path/KielMAT/'.
 
     Returns:
     --------
@@ -59,7 +61,7 @@ def kielmat_process_single_file(
         A status string indicating processing success, a skipped status message 
         if the destination file already exists on disk, or a detailed error failure trace.
     """
-    output_dir = data_path / "toolbox1" / "KielMAT"
+    output_dir = output_path / "KielMAT"
     output_file = output_dir / f"{id}_{course}_{clip_id}.mat"
 
     if output_file.exists():
@@ -67,6 +69,7 @@ def kielmat_process_single_file(
 
     try:
         acceleration_data = segment[COLS] # KielMAT takes in a pandas dataframe
+        time = segment['time'].to_numpy().squeeze()
 
         vertical_accel_array = acceleration_data['acceleration_Pelvis_z'].to_numpy()
 
@@ -75,18 +78,38 @@ def kielmat_process_single_file(
             initial_sampling_frequency=SAMPLING_FREQUENCY
         )
 
-        temp = HS_times*1000 # heel strike times in ms
+        temp = (HS_times*1000) + time[0] # heel strike times in ms
         y_HS_pred = np.zeros((len(temp), 2)) # expected structure by the rest of the pipeline
         y_HS_pred[:,0] = temp 
 
-        temp = FO_times*1000 # foot off times in ms
+        temp = (FO_times*1000) + time[0] # foot off times in ms
         y_FO_pred = np.zeros((len(temp), 2)) # expected structure by the rest of the pipeline
         y_FO_pred[:,0] = temp 
+
+        def tag_foot(times, label):
+            if len(times) == 0: return np.empty((0, 2))
+            return np.column_stack((times, np.full(len(times), label)))
+
+
+        true_hs_r_tagged = tag_foot(true_hs_r, 0)
+        true_hs_l_tagged = tag_foot(true_hs_l, 0)
+        true_fo_r_tagged = tag_foot(true_fo_r, 0)
+        true_fo_l_tagged = tag_foot(true_fo_l, 0)
+
+        y_HS_true = np.vstack((true_hs_r_tagged, true_hs_l_tagged)) if len(true_hs_r_tagged) or len(true_hs_l_tagged) else np.empty((0, 2))
+        y_FO_true = np.vstack((true_fo_r_tagged, true_fo_l_tagged)) if len(true_fo_r_tagged) or len(true_fo_l_tagged) else np.empty((0, 2))
+
+        if len(y_HS_true): y_HS_true = y_HS_true[y_HS_true[:, 0].argsort()]
+        if len(y_FO_true): y_FO_true = y_FO_true[y_FO_true[:, 0].argsort()]
+
+        acc_mag = np.linalg.norm(acceleration_data.values, axis=1)
 
         # Create a structure matching what the pipeline expects:
         # results.y and results.y_hat
         results = {
+            "time": time,
             'y_HS': y_HS_true,         # true
+            'acc_mag_l': acc_mag,
             'y_FO': y_FO_true,
             'y_hat_HS': y_HS_pred,     # pred
             'y_hat_FO': y_FO_pred
