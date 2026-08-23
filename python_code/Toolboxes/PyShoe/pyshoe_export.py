@@ -17,7 +17,7 @@ RIGHT_FOOT_COLS = ['acceleration_RightFoot_x', 'acceleration_RightFoot_y', 'acce
 LEFT_FOOT_COLS = ['acceleration_LeftFoot_x', 'acceleration_LeftFoot_y', 'acceleration_LeftFoot_z', 'angularVelocity_LeftFoot_x', 'angularVelocity_LeftFoot_y', 'angularVelocity_LeftFoot_z']
 TARGET_COLS = ["time"] + RIGHT_FOOT_COLS + LEFT_FOOT_COLS
 
-DETECTORS = ['shoe', 'ared', 'amvd', 'mbgtd']
+# DETECTORS = ['shoe', 'ared', 'amvd', 'mbgtd'] techically, but for speed we only run 'shoe' in this pipeline. The others are available for future use.
 DETECTORS = ['shoe']
 SPECS = {  # G values are sensor/walking surface dependent more at https://github.com/utiasSTARS/pyshoe/tree/master
     'shoe': {"G":1583}, # 7651 for FO newbee
@@ -228,17 +228,25 @@ def pyshoe_process_single_file(
         The data source for the trial. A pre-sliced Pandas DataFrame containing the target 
         time frame. Must contain a 'time' index alongside the bilateral 
         acceleration and angular velocity columns.
+
+    has_gravity : bool
+        Indicates whether the input IMU data includes gravity in the accelerometer 
+        channels. This affects the computation of the SHOE likelihood ratio test.
         
     course: str
-        The name of the course or environment directory (e.g., 'course_1').
+        The name of the course or environment directory (e.g., 'course_A').
         
     id : str
         The subject identifier string matching the directory layout (e.g., 'subj_01').
         
-    true_hs_r : pd.DataFrame or pd.Series or np.ndarray
+    clip_id : int
+        A unique integer identifier for the specific trial or clip within the course 
+        and subject.
+        
+    true_hs_r/true_hs_l : pd.DataFrame or pd.Series or np.ndarray
         The ground truth heel strike annotations for this specific segment window.
         
-    true_fo_r : pd.DataFrame or pd.Series or np.ndarray
+    true_fo_r/true_fo_l : pd.DataFrame or pd.Series or np.ndarray
         The ground truth foot off annotations for this specific segment window.
         
     output_path : pathlib.Path

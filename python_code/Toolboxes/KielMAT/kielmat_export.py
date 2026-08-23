@@ -61,7 +61,7 @@ def kielmat_process_single_file(
         A status string indicating processing success, a skipped status message 
         if the destination file already exists on disk, or a detailed error failure trace.
     """
-    output_dir = output_path / "KielMAT"
+    output_dir = output_path / "kielmat"
     output_file = output_dir / f"{id}_{course}_{clip_id}.mat"
 
     if output_file.exists():
