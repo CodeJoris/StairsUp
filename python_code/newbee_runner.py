@@ -1,3 +1,22 @@
+'''
+Module: newbee_runner.py
+
+This script serves as the main entry point for processing the NewBee dataset. 
+It extracts the target sequences, prepares the data, and processes it using 
+the KielMAT and PyShoe toolboxes. The script supports parallel processing to 
+speed up the workflow.
+
+dependencies:
+- pandas
+- numpy
+- pathlib
+- concurrent.futures
+- python_code.src.preprocessing.extract_golden_standard
+- python_code.src.preprocessing.extract_stairs
+- python_code.Toolboxes.KielMAT.kielmat_export
+- python_code.Toolboxes.PyShoe.pyshoe_export
+'''
+
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -7,13 +26,20 @@ from concurrent.futures import ProcessPoolExecutor
 from python_code.src.preprocessing.extract_golden_standard import extract_golden_standard
 from python_code.Toolboxes.KielMAT.kielmat_export import kielmat_process_single_file
 from python_code.Toolboxes.PyShoe.pyshoe_export import pyshoe_process_single_file
-from python_code.src.preprocessing.extract_stairs import get_stair_segments
+from python_code.src.preprocessing.newbee_surface_extraction import get_stair_segments
 
 # Constants
 SAMPLING_FREQUENCY = 60
 DATA_PATH = Path(__file__).resolve().parent.parent / "data"
-TARGET_MODE = "stairs_up" #"stairs_up" # CHANGE THIS: to see other surfaces
-OUTPUT_PATH = DATA_PATH / TARGET_MODE
+TARGET_MODE = "stairs_up" # CHANGE THIS: to see other surfaces
+
+'''
+Available surfaces in the NewBee dataset:
+{'pavement_down', 'stairs_up', 'walk', 'slope_down', 
+'pavement_up', 'slope_up', 'stairs_down'}
+'''
+
+OUTPUT_PATH = DATA_PATH / f'newbee_{TARGET_MODE}'
 COLS = ["time", "insoles_RightFoot_is_step", "insoles_LeftFoot_is_step", "insoles_RightFoot_is_lifted", "insoles_LeftFoot_is_lifted"]
 
 def get_ytrue_for_stairs(course: str, id: str) -> list:
@@ -46,7 +72,7 @@ def get_ytrue_for_stairs(course: str, id: str) -> list:
             invalid file paths) and returns None.
     """
     try:
-        file_path = DATA_PATH / "data_set" / course / id / "labels.csv"
+        file_path = DATA_PATH / "newbee" / course / id / "labels.csv"
 
         # 1. Get our stairs segments (start and end times)
         stair_blocks = get_stair_segments(str(file_path), target_mode=TARGET_MODE)
