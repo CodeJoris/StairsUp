@@ -46,7 +46,7 @@ def extract_surface_segments(dataset_base_path: str, surface: str) -> List[Dict[
             ic_list, tc_list = [], []
             
             for sensor in ['left_sensor', 'right_sensor', 'hip_sensor']:
-                if sensor in datapoint.data and sensor in events:
+                if sensor in datapoint.data:
                     sensor_df = datapoint.data[sensor]
                     
                     acc_array = sensor_df[['acc_x', 'acc_y', 'acc_z']].values
@@ -58,8 +58,11 @@ def extract_surface_segments(dataset_base_path: str, surface: str) -> List[Dict[
                     }
                     
                     # Extract the events for the specific foot
-                    ic_raw = events[sensor]['ic'].dropna().astype(int).values
-                    tc_raw = events[sensor]['tc'].dropna().astype(int).values
+                    if sensor in events:
+                        ic_raw = events[sensor]['ic'].dropna().astype(int).values
+                        tc_raw = events[sensor]['tc'].dropna().astype(int).values
+                    else:
+                        ic_raw, tc_raw = np.array([]), np.array([])
                     
                     # Enforce Stance Phase Boundaries (starts with IC, ends with TC)
                     if len(ic_raw) > 0 and len(tc_raw) > 0:
