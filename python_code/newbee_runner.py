@@ -26,7 +26,7 @@ from concurrent.futures import ProcessPoolExecutor
 from python_code.src.preprocessing.extract_golden_standard import extract_golden_standard
 from python_code.Toolboxes.KielMAT.kielmat_export import kielmat_process_single_file
 from python_code.Toolboxes.PyShoe.pyshoe_export import pyshoe_process_single_file
-from python_code.src.preprocessing.newbee_surface_extraction import get_stair_segments
+from python_code.src.preprocessing.newbee_surface_extraction import extract_surface_segments
 
 # Constants
 SAMPLING_FREQUENCY = 60
@@ -75,7 +75,7 @@ def get_ytrue_for_stairs(course: str, id: str) -> list:
         file_path = DATA_PATH / "newbee" / course / id / "labels.csv"
 
         # 1. Get our stairs segments (start and end times)
-        stair_blocks = get_stair_segments(str(file_path), target_mode=TARGET_MODE)
+        stair_blocks = extract_surface_segments(str(file_path), target_mode=TARGET_MODE)
         if stair_blocks.empty:
             return []  # No stairs up in this entire trial
 
