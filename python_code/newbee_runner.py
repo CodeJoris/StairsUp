@@ -179,7 +179,8 @@ def process_file_all_toolboxes(file_path: Path) -> str:
             sensor_clip, course, id, clip['segment_id'], 
             clip['y_HS_r'], clip['y_FO_r'], 
             clip['y_HS_l'], clip['y_FO_l'], 
-            OUTPUT_PATH)
+            OUTPUT_PATH, SAMPLING_FREQUENCY
+        )
         # res_kielmat = "Not on"
         res_pyshoe = pyshoe_process_single_file(
             sensor_clip, False, course, id, clip['segment_id'], 
