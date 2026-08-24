@@ -10,7 +10,7 @@ import pandas as pd
 REQUIRED_LABEL_COLS = ["time", "walk_mode"]
 
 
-def get_stair_segments(f_label: str, target_mode: str = "stairs_up") -> pd.DataFrame:
+def extract_surface_segments(f_label: str, target_mode: str = "stairs_up") -> pd.DataFrame:
     """
     Parse a labels.csv file and extract continuous blocks of a walking mode.
 
@@ -108,7 +108,7 @@ def export_stair_clips(f_sensor: str, f_label: str, output_dir: str) -> Optional
     if not os.path.exists(f_label):
         raise FileNotFoundError(f"Ground-truth label file not found at: {f_label}")
 
-    segments = get_stair_segments(f_label, target_mode="stairs_up")
+    segments = extract_surface_segments(f_label, target_mode="stairs_up")
     if segments.empty:
         print(f"No 'stairs_up' segments found for {Path(f_label).name}. Skipping.")
         return None
@@ -133,8 +133,8 @@ def export_stair_clips(f_sensor: str, f_label: str, output_dir: str) -> Optional
 
 
 if __name__ == "__main__":
-    print("Testing get_stair_segments logic execution...")
+    print("Testing extract_surface_segments logic execution...")
     path = r"C:\Users\theil\Documents\0_summer2026\0_git\StairsUp\data\data_set\courseA\id01\labels.csv"
-    segments_df = get_stair_segments(path)
+    segments_df = extract_surface_segments(path)
     for start, end in zip(segments_df["start_time"], segments_df["end_time"]):
         print(start, end)

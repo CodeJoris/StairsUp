@@ -16,13 +16,15 @@ from typing import List, Dict, Any
 from pathlib import Path
 from gaitmap_datasets import StairAmbulationHealthy2021PerTest
 
-def extract_ascending_stairs_data(dataset_base_path: str) -> List[Dict[str, Any]]:
+def extract_surface_segments(dataset_base_path: str, surface: str) -> List[Dict[str, Any]]:
     # Ensure include_pressure_data=True to fetch the ground truth
     dataset = StairAmbulationHealthy2021PerTest(
         data_folder=Path(dataset_base_path), 
-        include_pressure_data=True
+        include_pressure_data=True,
+        include_hip_sensor = True
     )
-    
+
+    parts = surface.split('_')
     extracted_tests = []
     sensor_tags = {'right_sensor': 0, 'left_sensor': 1}
     
@@ -32,7 +34,7 @@ def extract_ascending_stairs_data(dataset_base_path: str) -> List[Dict[str, Any]
         test_name = str(datapoint.group.test).lower()
         
         # Strictly filter for stair climbing (e.g., 'stair_flat_up_fast')
-        if 'stair' in test_name and 'up' in test_name:
+        if all(part in test_name for part in parts):
             fs = float(datapoint.sampling_rate_hz)
             
             # Use the correct attribute for discrete gait events
@@ -43,7 +45,7 @@ def extract_ascending_stairs_data(dataset_base_path: str) -> List[Dict[str, Any]
             sensor_dict = {}
             ic_list, tc_list = [], []
             
-            for sensor in ['left_sensor', 'right_sensor']:
+            for sensor in ['left_sensor', 'right_sensor', 'hip_sensor']:
                 if sensor in datapoint.data and sensor in events:
                     sensor_df = datapoint.data[sensor]
                     
