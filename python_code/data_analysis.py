@@ -563,21 +563,25 @@ class GaitAnalysisPipeline:
         fig.show()
 
 if __name__ == "__main__":
-    # 1. Add Argparse
+    TARGET_SURFACE = "stairs_up"  # Change this to your target surface if needed
+    TARGET_DATASET = 'newbee'  # Change this to your target dataset if needed
+    EXCLUDE_WORST_N = 0  # Number of worst segments to drop for summary statistics
+
+    # Argparse
     parser = argparse.ArgumentParser(description="Gait Analysis Pipeline")
     parser.add_argument('-d', '--detector', type=str, help="Specify detector to visualize extremes (e.g., -d shoe, -d ared)")
     args = parser.parse_args()
 
-    # 2. Existing Data Processing
-    STAIRS_DIRECTORY = Path(__file__).resolve().parent.parent / "data" / "stairs_up"
-    WALK_DIRECTORY = Path(__file__).resolve().parent.parent / "data" / "walk"
-    AMBULATION_STAIRS = Path(__file__).resolve().parent.parent / "data" / "ambulation_out"
+    # Path to .mat files
+    STAIRS_DIRECTORY = Path(__file__).resolve().parent.parent / "data" / f"{TARGET_DATASET}_{TARGET_SURFACE}" 
+    # you can change this to your actual data directory with the surface you insolated
+    # eg. WALK_DIRECTORY = Path(__file__).resolve().parent.parent / "data" / "walk"
 
     pipeline = GaitAnalysisPipeline(data_dir=STAIRS_DIRECTORY, tolerance_ms=300.0)
     pipeline.parse_and_match()
-    pipeline.generate_summary_table_without_worst(50)
+    pipeline.generate_summary_table_without_worst(EXCLUDE_WORST_N)
     
-    # 3. Dynamic Plotting Logic
+    # Plotting Logic
     if args.detector:
         print(f"\nGenerating diagnostic extreme plots for '{args.detector}' detector...")
         pipeline.visualize_extremes(detector=args.detector.lower(), metric='f1_score', event='HS')
@@ -585,5 +589,5 @@ if __name__ == "__main__":
     else:
         # Default global visualization if no command line switch is provided
         pipeline.visualize()
-        # pipeline.plot_threshold_tuning()
         pipeline.generate_roc_curve()
+        pipeline.plot_threshold_tuning()
