@@ -7,9 +7,6 @@ from kielmat.utils.preprocessing import signal_decomposition_algorithm
 
 # Define global constants
 COLS = ['acceleration_Pelvis_x', 'acceleration_Pelvis_y', 'acceleration_Pelvis_z']
-SAMPLING_FREQUENCY = 60
-
-
 
 def kielmat_process_single_file(
     segment: pd.DataFrame, 
@@ -20,7 +17,8 @@ def kielmat_process_single_file(
     true_fo_r: pd.DataFrame | np.ndarray, 
     true_hs_l: pd.DataFrame | np.ndarray, 
     true_fo_l: pd.DataFrame | np.ndarray, 
-    output_path: Path
+    output_path: Path,
+    fs: float
 ) -> str:
     """
     Processes a single trial dataset using KielMAT's signal decomposition algorithm 
@@ -75,7 +73,7 @@ def kielmat_process_single_file(
 
         HS_times, FO_times = signal_decomposition_algorithm(
             vertical_accelerarion_data=vertical_accel_array,
-            initial_sampling_frequency=SAMPLING_FREQUENCY
+            initial_sampling_frequency=fs
         )
 
         temp = (HS_times*1000) + time[0] # heel strike times in ms
