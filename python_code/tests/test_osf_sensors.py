@@ -7,7 +7,7 @@ from typing import List, Dict, Any
 from pathlib import Path
 from gaitmap_datasets import StairAmbulationHealthy2021PerTest
 
-def extract_ascending_stairs_data(dataset_base_path: str) -> List[Dict[str, Any]]:
+def main(dataset_base_path: str) -> List[Dict[str, Any]]:
     # Ensure include_pressure_data=True to fetch the ground truth
     dataset = StairAmbulationHealthy2021PerTest(
         data_folder=Path(dataset_base_path), 
@@ -16,15 +16,13 @@ def extract_ascending_stairs_data(dataset_base_path: str) -> List[Dict[str, Any]
     )
 
     for datapoint in dataset:
-        
-        # Use the correct attribute for discrete gait events
         events = getattr(datapoint, 'pressure_insole_event_list_', None)
-        if events is None or events.empty if hasattr(events, 'empty') else not events:
-            continue 
 
-        print(datapoint.data.keys())
+        # print(datapoint.data['hip_sensor'])
+        print(events)
+        print(datapoint.sampling_rate_hz)
         break
                 
 if __name__ == "__main__":
     dataset_path = Path(__file__).parent.parent.parent / "data" / "osf"
-    extracted_tests = extract_ascending_stairs_data(dataset_path)
+    extracted_tests = main(dataset_path)
