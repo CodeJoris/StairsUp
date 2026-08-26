@@ -211,7 +211,8 @@ def pyshoe_process_single_file(
     true_hs_l: pd.DataFrame | np.ndarray, 
     true_fo_l: pd.DataFrame | np.ndarray, 
     output_path: Path,
-    fs: float
+    fs: float,
+    G: float = None
 ) -> str:
     """
     Processes a single trial dataset across all four zero-velocity update (ZUPT) 
@@ -286,8 +287,8 @@ def pyshoe_process_single_file(
 
             # 2. Bypass the EKF Trajectory Math
             if detector_name == 'shoe':
-                steps_left, T_l = compute_shoe_timing(imu_left, sigma_a_l, sigma_w_l, W, G_val, has_gravity)
-                steps_right, T_r = compute_shoe_timing(imu_right, sigma_a_r, sigma_w_r, W, G_val, has_gravity)
+                steps_left, T_l = compute_shoe_timing(imu_left, sigma_a_l, sigma_w_l, W, G if G is not None else G_val, has_gravity)
+                steps_right, T_r = compute_shoe_timing(imu_right, sigma_a_r, sigma_w_r, W, G if G is not None else G_val, has_gravity)
             else:
                 # For ARED, AMVD, MBGTD: initialize INS but ONLY compute the detector array, 
                 # skipping the heavy .baseline() Kalman Filter loop completely.
