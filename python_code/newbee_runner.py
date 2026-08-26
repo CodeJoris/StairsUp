@@ -6,6 +6,8 @@ It extracts the target sequences, prepares the data, and processes it using
 the KielMAT and PyShoe toolboxes. The script supports parallel processing to 
 speed up the workflow.
 
+Units of the dataset are rads/s for gyroscope and m/s^2 for accelerometer.
+
 dependencies:
 - pandas
 - numpy
