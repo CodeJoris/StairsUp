@@ -207,6 +207,9 @@ def process_single_test(test_data: Dict[str, Any], toolbox_dir: Path) -> str:
         return f"Skipped {test_name}"
 
     segment_df = build_sensor_dataframe(test_data['sensors'], fs)
+
+    if segment_df.empty:
+        return f"Skipped {test_name} (Empty sensor data)"
     
     # Apply tilt correction to the hip sensor
     segment_df = align_and_correct_tilt(
