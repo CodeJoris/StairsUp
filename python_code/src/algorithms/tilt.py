@@ -191,7 +191,7 @@ def align_and_correct_tilt(
         raise ValueError("accel_cols and gyro_cols must contain exactly 3 column names.")
     
     # Create a deep copy to prevent SettingWithCopyWarnings[cite: 2]
-    df_corrected = pd.DataFrame()
+    df_corrected = continuous_df.copy()
 
     # Extract arrays
     accel_data = continuous_df[accel_cols].to_numpy()
@@ -212,9 +212,9 @@ def align_and_correct_tilt(
     df_corrected['q_y'] = quaternions[:, 2]
     df_corrected['q_z'] = quaternions[:, 3]
 
-    df_corrected[f"{accel_cols[0]}"] = dynamic_accel_global[:, 0]
-    df_corrected[f"{accel_cols[1]}"] = dynamic_accel_global[:, 1]
-    df_corrected[f"{accel_cols[2]}"] = dynamic_accel_global[:, 2]
+    df_corrected[f"{accel_cols[0]}_corrected"] = dynamic_accel_global[:, 0]
+    df_corrected[f"{accel_cols[1]}_corrected"] = dynamic_accel_global[:, 1]
+    df_corrected[f"{accel_cols[2]}_corrected"] = dynamic_accel_global[:, 2]
 
     return df_corrected
 
