@@ -12,13 +12,15 @@ def kielmat_process_single_file(
     segment: pd.DataFrame, 
     course: str, 
     id: str, 
-    clip_id: int,  # Added to separate staircase events
+    clip_id: int | str,
     true_hs_r: pd.DataFrame | np.ndarray, 
     true_fo_r: pd.DataFrame | np.ndarray, 
     true_hs_l: pd.DataFrame | np.ndarray, 
     true_fo_l: pd.DataFrame | np.ndarray, 
     output_path: Path,
-    fs: float
+    fs: float,
+    accel_cols: list[str] = None,
+    output_subfolder: str = "kielmat"
 ) -> str:
     """
     Processes a single trial dataset using KielMAT's signal decomposition algorithm 
@@ -32,7 +34,8 @@ def kielmat_process_single_file(
     -----------
     segment : pd.DataFrame
         The data source for the trial. A pre-sliced Pandas DataFrame containing the target 
-        time frame. Must contain at minimum the column: 'acceleration_Pelvis_z'.
+        time frame. Must contain at minimum the column: 'acceleration_Pelvis_z'. Acceleration
+        units are expected to be in m/s^2. The DataFrame must also contain a 'time' column in milliseconds.
         
     course : str
         The name of the course or environment directory (e.g., 'courseA').
@@ -49,9 +52,12 @@ def kielmat_process_single_file(
     y_FO_true : pd.DataFrame or pd.Series or np.ndarray
         The ground truth foot off annotations for this specific segment window.
         
-    ouput_path : pathlib.Path
-        The base Path object pointing to the output directory where outputs 
-        will be structured under 'output_path/KielMAT/'.
+    accel_cols : list[str], optional
+        List of 3 column names [acc_x, acc_y, acc_z]. Last element must be the vertical acceleration channel.
+        Defaults to ['acceleration_Pelvis_x', 'acceleration_Pelvis_y', 'acceleration_Pelvis_z'].
+
+    output_subfolder : str, optional
+        Subdirectory name inside `output_path`. Defaults to 'kielmat'.
 
     Returns:
     --------
@@ -59,17 +65,20 @@ def kielmat_process_single_file(
         A status string indicating processing success, a skipped status message 
         if the destination file already exists on disk, or a detailed error failure trace.
     """
-    output_dir = output_path / "kielmat"
+    if accel_cols is None:
+        accel_cols = ['acceleration_Pelvis_x', 'acceleration_Pelvis_y', 'acceleration_Pelvis_z']
+
+    output_dir = output_path / output_subfolder
     output_file = output_dir / f"{id}_{course}_{clip_id}.mat"
 
     if output_file.exists():
         return f"Skipped {id}_{course}_clip_{clip_id}.mat (already processed)"
 
     try:
-        acceleration_data = segment[COLS] # KielMAT takes in a pandas dataframe
+        acceleration_data = segment[accel_cols] # KielMAT takes in a pandas dataframe
         time = segment['time'].to_numpy().squeeze()
 
-        vertical_accel_array = acceleration_data['acceleration_Pelvis_z'].to_numpy()
+        vertical_accel_array = acceleration_data[accel_cols[2]].to_numpy()
 
         HS_times, FO_times = signal_decomposition_algorithm(
             vertical_accelerarion_data=vertical_accel_array,

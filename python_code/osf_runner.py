@@ -34,7 +34,7 @@ from python_code.src.algorithms.tilt import align_and_correct_tilt
 
 DATA_PATH = Path(__file__).resolve().parent.parent / "data"
 TARGET_MODE = "stair_up"  # CHANGE THIS: to see other surfaces 
-#eg. 'stairs_down' gets you all segments with atleast 'stairs' and 'down' in the test name.
+#eg. 'stair_down' gets you all segments with atleast 'stair' and 'down' in the test name.
 
 '''
 surface names:
@@ -49,7 +49,6 @@ surface names:
 'staircase_flying_normal', 'stair_flat_down_normal'}
 '''
 
-OUTPUT_DIR = DATA_PATH / f'osf_{TARGET_MODE}'  # Change this to your desired output directory"
 
 def generate_identifiers(test_name: str) -> Tuple[str, str, str]:
     """
@@ -77,7 +76,7 @@ def is_already_processed(
     subject_id: str, 
     course: str, 
     clip_id: str, 
-    toolbox_dir: Path
+    output_dir: Path
 ) -> bool:
     """
     Checks if the data segment has already been processed by all toolboxes.
@@ -90,7 +89,7 @@ def is_already_processed(
         The name of the dataset/course.
     clip_id : str
         The specific clip identifier.
-    toolbox_dir : Path
+    output_dir : Path
         The base output directory for the processed files.
 
     Returns
@@ -98,8 +97,9 @@ def is_already_processed(
     bool
         True if the outputs for all detectors already exist, False otherwise.
     """
-    for detector in ['shoe', 'kielmat']:
-        if not (toolbox_dir / detector / f"{subject_id}_{course}_{clip_id}.mat").exists():
+    required_folders = ['shoe', 'kielmat_raw', 'kielmat_corrected']
+    for folder in required_folders:
+        if not (output_dir / folder / f"{subject_id}_{course}_{clip_id}.mat").exists():
             return False
     return True
 
@@ -181,7 +181,7 @@ def extract_gait_events(
     return true_hs_r, true_fo_r, true_hs_l, true_fo_l
 
 
-def process_single_test(test_data: Dict[str, Any], toolbox_dir: Path) -> str:
+def process_single_test(test_data: Dict[str, Any], output_dir: Path) -> str:
     """
     Worker function to process a single sequence and execute target algorithms.
     Applies tilt correction to the hip sensor prior to export.
@@ -190,7 +190,7 @@ def process_single_test(test_data: Dict[str, Any], toolbox_dir: Path) -> str:
     ----------
     test_data : Dict[str, Any]
         Dictionary containing test metadata, ground truth, and synchronized sensor sequences.
-    toolbox_dir : Path
+    output_dir : Path
         The directory path where output files will be saved.
 
     Returns
@@ -203,15 +203,14 @@ def process_single_test(test_data: Dict[str, Any], toolbox_dir: Path) -> str:
     
     subject_id, course, clip_id = generate_identifiers(test_name)
 
-    if is_already_processed(subject_id, course, clip_id, toolbox_dir):
+    if is_already_processed(subject_id, course, clip_id, output_dir):
         return f"Skipped {test_name}"
 
     segment_df = build_sensor_dataframe(test_data['sensors'], fs)
-
     if segment_df.empty:
         return f"Skipped {test_name} (Empty sensor data)"
     
-    # Apply tilt correction to the hip sensor
+    # 1. Apply tilt correction (creates '*_corrected' columns)
     segment_df = align_and_correct_tilt(
         continuous_df=segment_df,
         accel_cols=[
@@ -229,34 +228,58 @@ def process_single_test(test_data: Dict[str, Any], toolbox_dir: Path) -> str:
         unit='m/s^2'
     )
 
-    # Extract gait events and run processing
     true_hs_r, true_fo_r, true_hs_l, true_fo_l = extract_gait_events(test_data['ground_truth'], fs)
 
     pyshoe_result = pyshoe_process_single_file(
         segment_df, True, course, subject_id, clip_id, 
         true_hs_r, true_fo_r, 
         true_hs_l, true_fo_l, 
-        toolbox_dir, fs, G=29798
+        output_dir, fs, G=29798
     )
     
-    kielmat_result = kielmat_process_single_file(
+    kielmat_raw_result = kielmat_process_single_file(
         segment_df, course, subject_id, clip_id, 
         true_hs_r, true_fo_r, 
         true_hs_l, true_fo_l, 
-        toolbox_dir, fs
+        output_dir, fs,
+        accel_cols=[
+            "acceleration_Pelvis_x", 
+            "acceleration_Pelvis_y", 
+            "acceleration_Pelvis_z"
+        ],
+        output_subfolder="kielmat_raw"
     )
 
-    return f"{test_name} => PyShoe [{pyshoe_result}] | KielMAT [{kielmat_result}]"
+    kielmat_corr_result = kielmat_process_single_file(
+        segment_df, course, subject_id, clip_id, 
+        true_hs_r, true_fo_r, 
+        true_hs_l, true_fo_l, 
+        output_dir, fs,
+        accel_cols=[
+            "acceleration_Pelvis_x_corrected", 
+            "acceleration_Pelvis_y_corrected", 
+            "acceleration_Pelvis_z_corrected"
+        ],
+        output_subfolder="kielmat_corrected"
+    )
+
+    return (
+        f"{test_name} => PyShoe [{pyshoe_result}] | "
+        f"KielMAT Raw [{kielmat_raw_result}] | "
+        f"KielMAT Corr [{kielmat_corr_result}]"
+    )
 
 
 if __name__ == "__main__":
-    NILSPOD_DATA_PATH = DATA_PATH / "osf"
-    
-    if NILSPOD_DATA_PATH.exists():
-        ascending_tests = extract_surface_segments(str(NILSPOD_DATA_PATH), TARGET_MODE)
+    OSF_PATH = DATA_PATH / "osf"
+    OUTPUT_DIR = DATA_PATH / f'osf_{TARGET_MODE}'  # Change this to your desired output directory"
+
+    if OSF_PATH.exists():
+        ascending_tests = extract_surface_segments(str(OSF_PATH), TARGET_MODE)
         
-        worker_func = partial(process_single_test, toolbox_dir=OUTPUT_DIR)
+        worker_func = partial(process_single_test, output_dir=OUTPUT_DIR)
         
         print("\nStarting Parallel Processing...")
         with ProcessPoolExecutor() as executor:
-            results = list(tqdm(executor.map(worker_func, ascending_tests), total=len(ascending_tests)))
+            for result in tqdm(executor.map(worker_func, ascending_tests), total=len(ascending_tests)):
+                tqdm.write(result)
