@@ -124,9 +124,11 @@ def clean_raw_zupt_mask(
             
     return cleaned_mask, np.array(valid_hs), np.array(valid_fo)
 
-def estimate_noise_from_midstance(
+def estimate_noise_and_calibrate_G_from_midstance(
     imu_data: np.ndarray, 
     fs: float, 
+    W: int,
+    has_gravity: bool = True,
     window_duration_sec: float = 0.1
 ) -> tuple[float, float]:
     """
@@ -146,8 +148,8 @@ def estimate_noise_from_midstance(
 
     Returns
     -------
-    tuple[float, float]
-        Estimated accelerometer (sigma_a) and gyroscope (sigma_w) noise standard deviations.
+    tuple[float, float, float]
+        Estimated accelerometer (var_a), gyroscope (var_w) noise variances, and optimal G.
     """
     window_size = max(5, int(fs * window_duration_sec))
     acc = imu_data[:, 0:3]
@@ -156,23 +158,33 @@ def estimate_noise_from_midstance(
     acc_mag_series = pd.Series(acc_mag)
     rolling_var = acc_mag_series.rolling(window=window_size).var()
     quietest_end_idx = rolling_var.idxmin()
+
+    optimal_G = None
     
     if pd.isna(quietest_end_idx):
-        var_a = np.var(acc, axis=0)
+        var_a = np.mean(np.var(acc, axis=0))
         var_w = np.var(gyr, axis=0)
     else:
         quietest_start_idx = int(quietest_end_idx) - window_size + 1
         static_acc = acc[quietest_start_idx : int(quietest_end_idx) + 1]
         static_gyr = gyr[quietest_start_idx : int(quietest_end_idx) + 1]
-        var_a = np.var(static_acc, axis=0)
+        var_a = np.mean(np.var(static_acc, axis=0))
         var_w = np.var(static_gyr, axis=0)
-        
-    return max(var_a, 1e-5), max(var_w, 1e-5)
+        static_T = compute_LRT_array(imu_data[quietest_start_idx : int(quietest_end_idx) + 1], var_a, var_w, W, has_gravity=has_gravity)
 
-def estimate_noise_from_static_trial(
+        T_static_mean = np.mean(static_T)
+        T_static_std = np.std(static_T)
+
+        optimal_G = T_static_mean + 3 * T_static_std 
+
+    return max(var_a, 1e-5), np.maximum(var_w, 1e-5), optimal_G
+
+def estimate_noise_and_calibrate_G_from_static_trial(
     static_df: pd.DataFrame, 
-    cols: list[str]
-) -> tuple[float, float]:
+    cols: list[str],
+    W: int,
+    has_gravity: bool
+) -> tuple[float, float, float]:
     """
     Estimates baseline sensor noise globally from a dedicated static trial.
 
@@ -190,22 +202,27 @@ def estimate_noise_from_static_trial(
 
     Returns
     -------
-    tuple[float, float]
-        Estimated accelerometer (var_a) and gyroscope (var_w) noise variances.
+    tuple[float, float, float]
+        Estimated accelerometer (var_a), gyroscope (var_w) noise variances, and optimal G.
     """
     data = static_df[cols].to_numpy()
-    
     acc = data[:, 0:3]
     gyr = data[:, 3:6]
     
-    var_a = np.var(acc, axis=0)
+    var_a = np.mean(np.var(acc, axis=0))
     var_w = np.var(gyr, axis=0)
-    
-    return max(var_a, 1e-5), max(var_w, 1e-5)
 
-def calibrate_G_from_sigmas(
-    var_a: float,
-    var_w: float,
+    # Extract T values for static segment.
+    T = compute_LRT_array(data, var_a, var_w, W, has_gravity)
+
+    T_static_mean = np.mean(T)
+    T_static_std = np.std(T)
+
+    optimal_G = T_static_mean + 3 * T_static_std 
+    
+    return max(var_a, 1e-5), np.maximum(var_w, 1e-5), optimal_G
+
+def calibrate_G_from_chi2(
     fs: float, 
     has_gravity: bool = True
 ) -> float:
@@ -213,14 +230,10 @@ def calibrate_G_from_sigmas(
     Derives the optimal zero-velocity threshold (G) using a purely static data segment.
 
     This function uses the chi-squared distribution to compute a threshold that is statistically
-    significant above the noise floor, providing a 20% safety margin.
+    significant above the noise floor, providing a 1% safety margin.
 
     Parameters
     ----------
-    var_a : float
-        Accelerometer noise variance.
-    var_w : float
-        Gyroscope noise variance.
     fs : float
         The sampling frequency of the IMU data in Hz.
     has_gravity : bool, optional
@@ -233,11 +246,14 @@ def calibrate_G_from_sigmas(
     """
     p_false_alarm = 0.01
     W = max(2, int(fs * 0.04))
-    dof = 5*W - 2 if has_gravity else 6*W
     
-    optimal_G = chi2.ppf(1 - p_false_alarm, df=dof) / W
+    # Effective Degrees of Freedom (EDOF)
+    dof = 5 if has_gravity else 6
     
-    return optimal_G
+    optimal_G = chi2.ppf(1 - p_false_alarm, df=dof)
+    
+    # Scale the threshold to align with the T statistic division by W
+    return optimal_G / W
 
 def compute_shoe_timing(
     imu_data: np.ndarray, 
@@ -276,30 +292,9 @@ def compute_shoe_timing(
         - T_padded: The continuous likelihood ratio test statistic array.
     """
     N = imu_data.shape[0]
-    acc = imu_data[:, 0:3]
-    gyro = imu_data[:, 3:6]
-    
-    inv_a = 1 / var_a
-    inv_w = 1 / var_w
-    
-    gyro_sq_mag = np.sum(gyro**2 * inv_w, axis=1) 
-    window = np.ones(W)
-    gyro_term = np.convolve(gyro_sq_mag, window, mode='valid') * inv_w
-    
-    if has_gravity:
-        acc_sq_mag = np.sum(acc**2 * inv_a, axis=1)
-        sum_acc_sq = np.convolve(acc_sq_mag, window, mode='valid')
-        sum_acc_x = np.convolve(acc[:, 0], window, mode='valid')
-        sum_acc_y = np.convolve(acc[:, 1], window, mode='valid')
-        sum_acc_z = np.convolve(acc[:, 2], window, mode='valid')
-        sum_acc_mag = np.sqrt(sum_acc_x**2 + sum_acc_y**2 + sum_acc_z**2)
-        g = 9.8029
-        acc_term = (sum_acc_sq - 2 * g * sum_acc_mag + W * (g**2))
-    else:
-        acc_sq_mag = np.sum(acc**2 * inv_a, axis=1)
-        acc_term = np.convolve(acc_sq_mag, window, mode='valid')
-        
-    T = (acc_term + gyro_term) / W
+
+    T = compute_LRT_array(imu_data, var_a, var_w, W, has_gravity)
+
     zv = np.zeros(N, dtype=bool)
     zv[:len(T)] = T < G
     zv[len(T):] = T[-1] < G
@@ -309,6 +304,63 @@ def compute_shoe_timing(
     T_padded[len(T):] = T[-1]
     
     return zv, T_padded
+
+def compute_LRT_array(
+    imu_data: np.ndarray, 
+    var_a: float, 
+    var_w: float, 
+    W: int, 
+    has_gravity: bool = True
+) -> np.ndarray:
+    '''
+    Computes the likelihood ratio test (LRT) statistic array for the SHOE detector.
+    
+    Parameters
+    ----------
+    imu_data : np.ndarray
+        An Nx6 array containing [acc_x, acc_y, acc_z, gyr_x, gyr_y, gyr_z].
+    var_a : float
+        Accelerometer noise variance.
+    var_w : float
+        Gyroscope noise variance.
+    W : int
+        Window size in samples.
+    has_gravity : bool, optional
+        Whether input data contains static gravity. Defaults to True.
+
+    Returns
+    -------
+    np.ndarray
+        The likelihood ratio test (LRT) statistic array.
+    '''
+    acc = imu_data[:, 0:3]
+    gyro = imu_data[:, 3:6]
+    
+    inv_a = 1.0 / var_a
+    inv_w = 1.0 / var_w
+
+    # Apply independent variance weights before summing
+    gyro_sq_mag = np.sum(gyro**2 * inv_w, axis=1)
+    window = np.ones(W)
+    gyro_term = np.convolve(gyro_sq_mag, window, mode='valid')
+    
+    if has_gravity:
+        acc_sq_mag = np.sum(acc**2, axis=1)
+        sum_acc_sq = np.convolve(acc_sq_mag, window, mode='valid')
+        sum_acc_x = np.convolve(acc[:, 0], window, mode='valid')
+        sum_acc_y = np.convolve(acc[:, 1], window, mode='valid')
+        sum_acc_z = np.convolve(acc[:, 2], window, mode='valid')
+        sum_acc_mag = np.sqrt(sum_acc_x**2 + sum_acc_y**2 + sum_acc_z**2)
+        g = 9.8029
+        # Scalar inv_a allows the gravity factoring to function correctly
+        acc_term = (sum_acc_sq - 2 * g * sum_acc_mag + W * (g**2)) * inv_a
+    else:
+        acc_sq_mag = np.sum(acc**2, axis=1)
+        acc_term = np.convolve(acc_sq_mag, window, mode='valid') * inv_a
+        
+    T = (acc_term + gyro_term) / W
+
+    return T
 
 def pyshoe_process_single_file(
     segment: pd.DataFrame, 
@@ -322,7 +374,6 @@ def pyshoe_process_single_file(
     output_path: Path,
     fs: float,
     has_gravity: bool,
-    enforce_min_spacing: bool = True,
     static_df: pd.DataFrame = None
 ) -> str:
     """
@@ -356,8 +407,6 @@ def pyshoe_process_single_file(
         The sampling frequency of the IMU data in Hz.
     has_gravity : bool
         Indicates if static gravity is present in the accelerometer data.
-    enforce_min_spacing : bool, optional
-        Whether to enforce a minimum time spacing between detected events. Defaults to True.
     static_df : pd.DataFrame, optional
         An optional DataFrame containing a static trial for noise baseline calibration. Defaults to None.
 
@@ -386,22 +435,17 @@ def pyshoe_process_single_file(
         imu_left = segment[LEFT_FOOT_COLS].to_numpy() 
         imu_right = segment[RIGHT_FOOT_COLS].to_numpy() 
         time = segment["time"].to_numpy().squeeze()
+        W = max(2, int(fs * 0.04))
 
         if static_df is not None:
             # 1. Get global static noise
-            sigma_a_l, sigma_w_l = estimate_noise_from_static_trial(static_df, LEFT_FOOT_COLS)
-            sigma_a_r, sigma_w_r = estimate_noise_from_static_trial(static_df, RIGHT_FOOT_COLS)
+            sigma_a_l, sigma_w_l, calibrated_G_l = estimate_noise_and_calibrate_G_from_static_trial(static_df, LEFT_FOOT_COLS, W=W, has_gravity=has_gravity)
+            sigma_a_r, sigma_w_r, calibrated_G_r = estimate_noise_and_calibrate_G_from_static_trial(static_df, RIGHT_FOOT_COLS, W=W, has_gravity=has_gravity)
 
         else:
             # Fallback to dynamic midstance estimation
-            sigma_a_l, sigma_w_l = estimate_noise_from_midstance(imu_left, fs)
-            sigma_a_r, sigma_w_r = estimate_noise_from_midstance(imu_right, fs)
-
-        # Calibrate G values based on noise estimates using chi-squared distribution
-        calibrated_G_l = calibrate_G_from_sigmas(sigma_a_l, sigma_w_l, fs, has_gravity)
-        calibrated_G_r = calibrate_G_from_sigmas(sigma_a_r, sigma_w_r, fs, has_gravity)
-
-        W = max(2, int(fs * 0.04))
+            sigma_a_l, sigma_w_l, calibrated_G_l = estimate_noise_and_calibrate_G_from_midstance(imu_left, fs, W=W, has_gravity=has_gravity)
+            sigma_a_r, sigma_w_r, calibrated_G_r = estimate_noise_and_calibrate_G_from_midstance(imu_right, fs, W=W, has_gravity=has_gravity)
 
         for detector_name, out_file in detectors_to_run:
             # Override dictionary G if static calibration was successfully executed for SHOE
@@ -421,18 +465,9 @@ def pyshoe_process_single_file(
                 steps_right = ins_r.Localizer.compute_zv_lrt(W=W, G=G_val_r, detector=detector_name)
 
             # ... [Rest of the extraction, tagging, and saving logic remains exactly the same] ...
-            if enforce_min_spacing:
-                _, HS_times_left, FO_times_left = clean_raw_zupt_mask(steps_left, time, W, min_spacing_ms=600, to_fo_delay_ms=150)
-                _, HS_times_right, FO_times_right = clean_raw_zupt_mask(steps_right, time, W, min_spacing_ms=600, to_fo_delay_ms=150)
 
-            else:
-                # Unconstrained raw edge transitions
-                diff_r = np.diff(steps_right, prepend=steps_right[0])
-                diff_l = np.diff(steps_left, prepend=steps_left[0])
-                hs_idx_r, fo_idx_r = np.where(diff_r == 1)[0], np.where(diff_r == -1)[0]  # stance start (Heel Strike)
-                hs_idx_l, fo_idx_l = np.where(diff_l == 1)[0], np.where(diff_l == -1)[0]   # stance start (Heel Strike)
-                HS_times_left, FO_times_left = time[hs_idx_l], time[fo_idx_l]
-                HS_times_right, FO_times_right = time[hs_idx_r], time[fo_idx_r]
+            _, HS_times_left, FO_times_left = clean_raw_zupt_mask(steps_left, time, W, min_spacing_ms=600, to_fo_delay_ms=150)
+            _, HS_times_right, FO_times_right = clean_raw_zupt_mask(steps_right, time, W, min_spacing_ms=600, to_fo_delay_ms=150)
 
             def tag_foot(times, label):
                 if len(times) == 0: return np.empty((0, 2))

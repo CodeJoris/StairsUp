@@ -1,6 +1,6 @@
 import numpy as np
-from ins_tools.util import *
-from ins_tools.EKF import Localizer
+from src.Toolboxes.PyShoe.ins_tools.util import *
+from src.Toolboxes.PyShoe.ins_tools.EKF import Localizer
 
 class INS():
     def __init__(self, imudata, has_gravity, sigma_a=0.01, sigma_w=0.1*np.pi/180, T=1.0/125, dt=None):

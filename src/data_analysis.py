@@ -10,7 +10,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 from scipy.io import loadmat
 from scipy.optimize import linear_sum_assignment
-from python_code.Toolboxes.PyShoe.pyshoe_export import clean_raw_zupt_mask
+from src.Toolboxes.PyShoe.pyshoe_export import clean_raw_zupt_mask
 import plotly.express as px
 import pandas as pd
 
@@ -316,7 +316,7 @@ class GaitAnalysisPipeline:
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
         plt.show()
 
-    def generate_roc_curve(self, detector: str = 'shoe', num_thresholds: int = 100):
+    def generate_roc_curve(self, detector: str = 'shoe', enforce_min_spacing: bool = True, num_thresholds: int = 100):
         """Generates an event-based ROC curve for HS and FO independently."""
         
         if detector != 'shoe':
@@ -396,11 +396,18 @@ class GaitAnalysisPipeline:
                 W = max(2, int(clip['fs'] * 0.04))
                 
                 # Raw GLRT decision
-                raw_mask = T < gamma
-                
-                # Centralized cleanup
-                _, hs_pred, fo_pred = clean_raw_zupt_mask(raw_mask, time, W, min_spacing_ms=600, to_fo_delay_ms = 150)
-                
+                raw_mask = (T < gamma).astype(int)
+
+                if enforce_min_spacing:
+                    _, hs_pred, fo_pred = clean_raw_zupt_mask(raw_mask, time, W, min_spacing_ms=600, to_fo_delay_ms=150)
+                else:
+                    # Unconstrained raw edge transitions
+                    diff = np.diff(raw_mask, prepend=raw_mask[0])
+                    hs_idx = np.where(diff == 1)[0]   # stance start (Heel Strike)
+                    fo_idx = np.where(diff == -1)[0]  # stance end (Foot Off)
+                    hs_pred = time[hs_idx]
+                    fo_pred = time[fo_idx]
+
                 # Match HS Events
                 matched_hs = self._match_events(clip['true_hs'], hs_pred)
                 tp_hs += sum(1 for m in matched_hs if m['classification'] == 'TP')
@@ -428,7 +435,7 @@ class GaitAnalysisPipeline:
         fig = px.line(roc_df, x='PFA', y='PD', color='Event', hover_data=['Threshold'], markers=True, 
                       title=f'Event-Based ROC Curve: {detector.upper()} (Filtered)')
         
-    # --- NEW: OVERLAY KIELMAT OPERATING POINTS ---
+        # Overlay KielMAT points if available in the dataset
         if not self.df_all_steps.empty:
             # Assumes your folder is named exactly "kielmat"
             kielmat_steps = self.df_all_steps[self.df_all_steps['detector'] == 'kielmat'] 
@@ -563,9 +570,10 @@ class GaitAnalysisPipeline:
         fig.show()
 
 if __name__ == "__main__":
-    TARGET_SURFACE = "stairs_up"  # Change this to your target surface if needed
+    TARGET_SURFACE = "stairs_down"  # Change this to your target surface if needed
     TARGET_DATASET = 'newbee'  # Change this to your target dataset if needed
     EXCLUDE_WORST_N = 0  # Number of worst segments to drop for summary statistics
+    ENFORCE_MIN_SPACING = True  # Enforce minimum spacing between detected events in ROC and tuning curves
 
     # Argparse
     parser = argparse.ArgumentParser(description="Gait Analysis Pipeline")
@@ -588,6 +596,6 @@ if __name__ == "__main__":
         pipeline.visualize_extremes(detector=args.detector.lower(), metric='f1_score', event='FO')
     else:
         # Default global visualization if no command line switch is provided
-        pipeline.visualize()
-        pipeline.generate_roc_curve()
+        # pipeline.visualize()
+        pipeline.generate_roc_curve(enforce_min_spacing=ENFORCE_MIN_SPACING)
         pipeline.plot_threshold_tuning()
