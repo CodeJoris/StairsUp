@@ -1,5 +1,5 @@
 """
-Module: src.processing.tilt_correction
+Module: processing.tilt_correction
 Description: 
     Handles the continuous 6-DOF sensor fusion of IMU data using a Madgwick 
     filter. Deconstructs the pipeline into single-task functions for unit 

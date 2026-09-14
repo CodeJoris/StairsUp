@@ -2,8 +2,8 @@ import numpy as np
 from numpy import linalg as LA
 # import ins_tools.LSTM as lstm #remove if there is no pytorch installation
 # import ins_tools.SVM as SVM #remove if there is no sci-kit-learn installation
-from src.Toolboxes.PyShoe.ins_tools.util import *
-from src.Toolboxes.PyShoe.ins_tools.geometry_helpers import quat2mat, mat2quat, euler2quat, quat2euler
+from Toolboxes.PyShoe.ins_tools.util import *
+from Toolboxes.PyShoe.ins_tools.geometry_helpers import quat2mat, mat2quat, euler2quat, quat2euler
 import joblib
 import sys
 sys.path.append('../')

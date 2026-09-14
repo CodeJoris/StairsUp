@@ -10,7 +10,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 from scipy.io import loadmat
 from scipy.optimize import linear_sum_assignment
-from src.Toolboxes.PyShoe.pyshoe_export import clean_raw_zupt_mask
+from Toolboxes.PyShoe.pyshoe_export import clean_raw_zupt_mask
 import plotly.express as px
 import pandas as pd
 
@@ -570,7 +570,7 @@ class GaitAnalysisPipeline:
         fig.show()
 
 if __name__ == "__main__":
-    TARGET_SURFACE = "stairs_down"  # Change this to your target surface if needed
+    TARGET_SURFACE = "stairs_up"  # Change this to your target surface if needed
     TARGET_DATASET = 'newbee'  # Change this to your target dataset if needed
     EXCLUDE_WORST_N = 0  # Number of worst segments to drop for summary statistics
     ENFORCE_MIN_SPACING = True  # Enforce minimum spacing between detected events in ROC and tuning curves
@@ -596,6 +596,6 @@ if __name__ == "__main__":
         pipeline.visualize_extremes(detector=args.detector.lower(), metric='f1_score', event='FO')
     else:
         # Default global visualization if no command line switch is provided
-        # pipeline.visualize()
+        pipeline.visualize()
         pipeline.generate_roc_curve(enforce_min_spacing=ENFORCE_MIN_SPACING)
         pipeline.plot_threshold_tuning()

@@ -1,5 +1,5 @@
 """
-Module: src.preprocessing.osf_surface_extraction
+Module: preprocessing.osf_surface_extraction
 Description: 
     Extracts and preprocesses the OSF Stair Ambulation dataset. 
     It filters the internal test metadata to strictly isolate specific 

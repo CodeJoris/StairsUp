@@ -1,6 +1,6 @@
 import numpy as np
 from numpy import linalg as LA
-from src.Toolboxes.PyShoe.ins_tools.geometry_helpers import *
+from Toolboxes.PyShoe.ins_tools.geometry_helpers import *
 # import ins_tools.SVM as SVM
 import copy
 import csv

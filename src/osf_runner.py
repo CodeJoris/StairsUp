@@ -27,10 +27,10 @@ from tqdm import tqdm
 from functools import partial
 from typing import Dict, Any, Tuple
 
-from src.processing.osf_surface_extraction import extract_surface_segments
-from src.Toolboxes.PyShoe.pyshoe_export import pyshoe_process_single_file
-from src.Toolboxes.KielMAT.kielmat_export import kielmat_process_single_file
-from src.algorithms.tilt import align_and_correct_tilt
+from processing.osf_surface_extraction import extract_surface_segments
+from Toolboxes.PyShoe.pyshoe_export import pyshoe_process_single_file
+from Toolboxes.KielMAT.kielmat_export import kielmat_process_single_file
+from algorithms.tilt import align_and_correct_tilt
 
 DATA_PATH = Path(__file__).resolve().parent.parent / "data"
 TARGET_MODE = "stair_up"  # CHANGE THIS: to see other surfaces 

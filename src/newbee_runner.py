@@ -3,7 +3,7 @@ Module: newbee_runner.py
 Description: 
     Serves as the main entry point for processing the NewBee dataset. 
     Extracts target sequences, prepares the data, and processes it using 
-    the KielMAT, PyShoe, and SKDH toolboxes. Supports parallel processing.
+    the KielMAT, and PyShoe toolboxes. Supports parallel processing.
 
     Newbee units: m/s^2 rads/s
 
@@ -11,23 +11,21 @@ Dependencies:
     - pandas
     - numpy
     - pathlib
-    - skdh
     - concurrent.futures
 """
 import pandas as pd
 import numpy as np
 from pathlib import Path
-import skdh
 from concurrent.futures import ProcessPoolExecutor
 
-from src.processing.extract_golden_standard import extract_golden_standard
-from src.Toolboxes.KielMAT.kielmat_export import kielmat_process_single_file
-from src.Toolboxes.PyShoe.pyshoe_export import pyshoe_process_single_file
-from src.processing.newbee_surface_extraction import extract_surface_segments
+from processing.extract_golden_standard import extract_golden_standard
+from Toolboxes.KielMAT.kielmat_export import kielmat_process_single_file
+from Toolboxes.PyShoe.pyshoe_export import pyshoe_process_single_file
+from processing.newbee_surface_extraction import extract_surface_segments
 
 SAMPLING_FREQUENCY = 60
 DATA_PATH = Path(__file__).resolve().parent.parent / "data"
-TARGET_MODE = "stairs_down" 
+TARGET_MODE = "stairs_up" 
 OUTPUT_PATH = DATA_PATH / f'newbee_{TARGET_MODE}'
 COLS = ["time", "insoles_RightFoot_is_step", "insoles_LeftFoot_is_step", "insoles_RightFoot_is_lifted", "insoles_LeftFoot_is_lifted"]
 
@@ -119,7 +117,7 @@ def process_file_all_toolboxes(file_path: Path) -> str:
 
     Extracts subject and course metadata dynamically from the provided 
     file path, extracts the timestamp-segmented ground truth, and sequentially evaluates 
-    the data through KielMAT, PyShoe, and SKDH toolboxes.
+    the data through KielMAT, PyShoe.
 
     Parameters
     ----------
@@ -151,15 +149,24 @@ def process_file_all_toolboxes(file_path: Path) -> str:
             clip['y_HS_l'], clip['y_FO_l'], 
             OUTPUT_PATH, SAMPLING_FREQUENCY
         )
-        
-        res_pyshoe = pyshoe_process_single_file(
-            sensor_clip, course, id, clip['segment_id'], 
-            clip['y_HS_r'], clip['y_FO_r'], 
-            clip['y_HS_l'], clip['y_FO_l'], 
-            OUTPUT_PATH, SAMPLING_FREQUENCY,
-            has_gravity=False, 
-            enforce_min_spacing=False
-        )
+
+        min_spacings = [600.0]  # Example values in milliseconds
+        to_fo_delays = [250.0]
+        num_of_stds = [5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0, 50.0]
+
+        for min_spacing in min_spacings:
+            for to_fo_delay in to_fo_delays:
+                for n_of_std in num_of_stds:
+                    res_pyshoe = pyshoe_process_single_file(
+                        sensor_clip, course, id, clip['segment_id'], 
+                        clip['y_HS_r'], clip['y_FO_r'], 
+                        clip['y_HS_l'], clip['y_FO_l'], 
+                        OUTPUT_PATH, SAMPLING_FREQUENCY,
+                        has_gravity=False,
+                        min_spacing_ms=min_spacing,
+                        to_fo_delay_ms=to_fo_delay,
+                        n_of_std=n_of_std
+                    )
                 
         results_summary.append(
             f"Clip {clip['segment_id']}: KielMAT [{res_kielmat}] | PyShoe [{res_pyshoe}]"
