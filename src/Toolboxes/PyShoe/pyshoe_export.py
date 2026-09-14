@@ -24,7 +24,7 @@ from scipy.stats import chi2
 PYSHOE_DIR = Path(__file__).resolve().parent
 if str(PYSHOE_DIR) not in sys.path:
     sys.path.insert(0, str(PYSHOE_DIR))
-from src.Toolboxes.PyShoe.ins_tools.INS import INS
+from Toolboxes.PyShoe.ins_tools.INS import INS
 
 RIGHT_FOOT_COLS = ['acceleration_RightFoot_x', 'acceleration_RightFoot_y', 'acceleration_RightFoot_z', 'angularVelocity_RightFoot_x', 'angularVelocity_RightFoot_y', 'angularVelocity_RightFoot_z']
 LEFT_FOOT_COLS = ['acceleration_LeftFoot_x', 'acceleration_LeftFoot_y', 'acceleration_LeftFoot_z', 'angularVelocity_LeftFoot_x', 'angularVelocity_LeftFoot_y', 'angularVelocity_LeftFoot_z']
@@ -129,7 +129,8 @@ def estimate_noise_and_calibrate_G_from_midstance(
     fs: float, 
     W: int,
     has_gravity: bool = True,
-    window_duration_sec: float = 0.1
+    window_duration_sec: float = 0.1,
+    n_of_std: float = 3.0
 ) -> tuple[float, float]:
     """
     Estimates the baseline sensor noise by isolating the quietest midstance.
@@ -175,7 +176,7 @@ def estimate_noise_and_calibrate_G_from_midstance(
         T_static_mean = np.mean(static_T)
         T_static_std = np.std(static_T)
 
-        optimal_G = T_static_mean + 3 * T_static_std 
+        optimal_G = T_static_mean + n_of_std * T_static_std 
 
     return max(var_a, 1e-5), np.maximum(var_w, 1e-5), optimal_G
 
@@ -183,7 +184,8 @@ def estimate_noise_and_calibrate_G_from_static_trial(
     static_df: pd.DataFrame, 
     cols: list[str],
     W: int,
-    has_gravity: bool
+    has_gravity: bool = True,
+    n_of_std: float = 3.0
 ) -> tuple[float, float, float]:
     """
     Estimates baseline sensor noise globally from a dedicated static trial.
@@ -218,7 +220,7 @@ def estimate_noise_and_calibrate_G_from_static_trial(
     T_static_mean = np.mean(T)
     T_static_std = np.std(T)
 
-    optimal_G = T_static_mean + 3 * T_static_std 
+    optimal_G = T_static_mean + n_of_std * T_static_std 
     
     return max(var_a, 1e-5), np.maximum(var_w, 1e-5), optimal_G
 
@@ -374,6 +376,9 @@ def pyshoe_process_single_file(
     output_path: Path,
     fs: float,
     has_gravity: bool,
+    min_spacing_ms: float = 600.0,
+    to_fo_delay_ms: float = 150.0,
+    n_of_std: float = 3.0,
     static_df: pd.DataFrame = None
 ) -> str:
     """
@@ -422,7 +427,7 @@ def pyshoe_process_single_file(
     """
     detectors_to_run = []
     for detector_name in DETECTORS:
-        out_file = output_path / detector_name / f'{id}_{course}_{clip_id}.mat'
+        out_file = output_path / f"{detector_name}_{min_spacing_ms}_{to_fo_delay_ms}_{n_of_std}" / f'{id}_{course}_{clip_id}.mat'
         if static_df is not None:
             out_file = output_path / f"{detector_name}_static" / f'{id}_{course}_{clip_id}.mat'
         if not out_file.exists():
@@ -439,13 +444,13 @@ def pyshoe_process_single_file(
 
         if static_df is not None:
             # 1. Get global static noise
-            sigma_a_l, sigma_w_l, calibrated_G_l = estimate_noise_and_calibrate_G_from_static_trial(static_df, LEFT_FOOT_COLS, W=W, has_gravity=has_gravity)
-            sigma_a_r, sigma_w_r, calibrated_G_r = estimate_noise_and_calibrate_G_from_static_trial(static_df, RIGHT_FOOT_COLS, W=W, has_gravity=has_gravity)
+            sigma_a_l, sigma_w_l, calibrated_G_l = estimate_noise_and_calibrate_G_from_static_trial(static_df, LEFT_FOOT_COLS, W=W, has_gravity=has_gravity, n_of_std=n_of_std)
+            sigma_a_r, sigma_w_r, calibrated_G_r = estimate_noise_and_calibrate_G_from_static_trial(static_df, RIGHT_FOOT_COLS, W=W, has_gravity=has_gravity, n_of_std=n_of_std)
 
         else:
             # Fallback to dynamic midstance estimation
-            sigma_a_l, sigma_w_l, calibrated_G_l = estimate_noise_and_calibrate_G_from_midstance(imu_left, fs, W=W, has_gravity=has_gravity)
-            sigma_a_r, sigma_w_r, calibrated_G_r = estimate_noise_and_calibrate_G_from_midstance(imu_right, fs, W=W, has_gravity=has_gravity)
+            sigma_a_l, sigma_w_l, calibrated_G_l = estimate_noise_and_calibrate_G_from_midstance(imu_left, fs, W=W, has_gravity=has_gravity, n_of_std=n_of_std)
+            sigma_a_r, sigma_w_r, calibrated_G_r = estimate_noise_and_calibrate_G_from_midstance(imu_right, fs, W=W, has_gravity=has_gravity, n_of_std=n_of_std)
 
         for detector_name, out_file in detectors_to_run:
             # Override dictionary G if static calibration was successfully executed for SHOE
@@ -466,8 +471,8 @@ def pyshoe_process_single_file(
 
             # ... [Rest of the extraction, tagging, and saving logic remains exactly the same] ...
 
-            _, HS_times_left, FO_times_left = clean_raw_zupt_mask(steps_left, time, W, min_spacing_ms=600, to_fo_delay_ms=150)
-            _, HS_times_right, FO_times_right = clean_raw_zupt_mask(steps_right, time, W, min_spacing_ms=600, to_fo_delay_ms=150)
+            _, HS_times_left, FO_times_left = clean_raw_zupt_mask(steps_left, time, W, min_spacing_ms=min_spacing_ms, to_fo_delay_ms=to_fo_delay_ms)
+            _, HS_times_right, FO_times_right = clean_raw_zupt_mask(steps_right, time, W, min_spacing_ms=min_spacing_ms, to_fo_delay_ms=to_fo_delay_ms)
 
             def tag_foot(times, label):
                 if len(times) == 0: return np.empty((0, 2))
@@ -507,7 +512,8 @@ def pyshoe_process_single_file(
                 'y_hat_HS': y_HS_pred,     
                 'y_hat_FO': y_FO_pred,
                 'T_l': T_l if detector_name == 'shoe' else [], 
-                'T_r': T_r if detector_name == 'shoe' else []
+                'T_r': T_r if detector_name == 'shoe' else [],
+                'g_opt': calibrated_G_l if detector_name == 'shoe' else None,
             }      
             out_file.parent.mkdir(parents=True, exist_ok=True)
             savemat(out_file, {'results': results})
